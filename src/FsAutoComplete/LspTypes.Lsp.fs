@@ -11,6 +11,11 @@ open Newtonsoft.Json
 
 type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: bool, state: State) as this =
 
+  // using a custom formatter so that we can add our own
+  // * converters
+  // * naming strategy
+  // * ignoring of missing members on payloads for forward-compatibility
+  // this lines up with the serializers used in the prior implementation
   let formatter: IJsonRpcMessageTextFormatter =
     let formatter = new JsonMessageFormatter()
     for converter in LanguageServerProtocol.Server.customConverters do
@@ -19,6 +24,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     formatter.JsonSerializer.MissingMemberHandling <- MissingMemberHandling.Ignore
     formatter.JsonSerializer.ContractResolver <- Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()
     formatter :> _
+  // LSP uses a header-delimited message stream, so we use the handler that understands that format
   let handler = new StreamJsonRpc.HeaderDelimitedMessageHandler(sender, reader, formatter)
   let rpc = new JsonRpc(handler, this)
 
@@ -27,12 +33,17 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   let mutable commandDisposables = ResizeArray()
 
   do
+    // hook up request/response logging for debugging
     rpc.TraceSource <- new TraceSource(typeof<FSharpLspServer>.Name, SourceLevels.Verbose)
     rpc.TraceSource.Listeners.Add(new SerilogTraceListener.SerilogTraceListener(typeof<FSharpLspServer>.Name)) |> ignore<int>
+    // start the pipes flowing
     rpc.StartListening()
 
   member x.WaitForClose() = rpc.Completion
 
+  // the names have to match exactly, which can suck if thye have / characters
+  // also, you have to match the parameters _exactly_, which means it's safer usually to have
+  // a parameter-object and turn on missing member handling ignoring in the json formatter.
   [<JsonRpcMethod("initialize", UseSingleObjectParameterDeserialization = true)>]
   member x.Initialize(p: InitializeParams) =
     task {
