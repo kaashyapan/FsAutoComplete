@@ -577,7 +577,7 @@ type FSharpLspServer(backgroundServiceEnabled: bool, state: State, lspClient: FS
                 | CoreResponse.Res ints ->
 
                     let serialized = CommandResponse.workspacePeek JsonSerializer.writeJson ints
-                    lspClient.NotifyWorkspacePeek {Content = serialized} |> Async.Start
+                    lspClient.NotifyWorkspacePeek {Content = serialized } |> Async.Start
 
                     let peeks =
                         ints

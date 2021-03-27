@@ -427,34 +427,33 @@ module CommandResponse =
   let projectLoading (serialize : Serializer) projectFileName =
     serialize { Kind = "projectLoading"; Data = { ProjectLoadingResponse.Project = projectFileName } }
 
-  let workspacePeek (serialize : Serializer) (found: WorkspacePeek.Interesting list) =
-    let mapInt i =
-        match i with
-        | WorkspacePeek.Interesting.Directory (p, fsprojs) ->
-            WorkspacePeekFound.Directory { WorkspacePeekFoundDirectory.Directory = p; Fsprojs = fsprojs }
-        | WorkspacePeek.Interesting.Solution (p, sd) ->
-            let rec item (x:Ionide.ProjInfo.InspectSln.SolutionItem) =
-                let kind =
-                    match x.Kind with
-                    |Ionide.ProjInfo.InspectSln.SolutionItemKind.Unknown
-                    |Ionide.ProjInfo.InspectSln.SolutionItemKind.Unsupported ->
-                        None
-                    |Ionide.ProjInfo.InspectSln.SolutionItemKind.MsbuildFormat msbuildProj ->
-                        Some (WorkspacePeekFoundSolutionItemKind.MsbuildFormat {
-                            WorkspacePeekFoundSolutionItemKindMsbuildFormat.Configurations = []
-                        })
-                    |Ionide.ProjInfo.InspectSln.SolutionItemKind.Folder(children, files) ->
-                        let c = children |> List.choose item
-                        Some (WorkspacePeekFoundSolutionItemKind.Folder {
-                            WorkspacePeekFoundSolutionItemKindFolder.Items = c
-                            Files = files
-                        })
-                kind
-                |> Option.map (fun k -> { WorkspacePeekFoundSolutionItem.Guid = x.Guid; Name = x.Name; Kind = k })
-            let items = sd.Items |> List.choose item
-            WorkspacePeekFound.Solution { WorkspacePeekFoundSolution.Path = p; Items = items; Configurations = [] }
+  let mapInteresting = function
+    | WorkspacePeek.Interesting.Directory (p, fsprojs) ->
+        WorkspacePeekFound.Directory { WorkspacePeekFoundDirectory.Directory = p; Fsprojs = fsprojs }
+    | WorkspacePeek.Interesting.Solution (p, sd) ->
+        let rec item (x:Ionide.ProjInfo.InspectSln.SolutionItem) =
+            let kind =
+                match x.Kind with
+                |Ionide.ProjInfo.InspectSln.SolutionItemKind.Unknown
+                |Ionide.ProjInfo.InspectSln.SolutionItemKind.Unsupported ->
+                    None
+                |Ionide.ProjInfo.InspectSln.SolutionItemKind.MsbuildFormat msbuildProj ->
+                    Some (WorkspacePeekFoundSolutionItemKind.MsbuildFormat {
+                        WorkspacePeekFoundSolutionItemKindMsbuildFormat.Configurations = []
+                    })
+                |Ionide.ProjInfo.InspectSln.SolutionItemKind.Folder(children, files) ->
+                    let c = children |> List.choose item
+                    Some (WorkspacePeekFoundSolutionItemKind.Folder {
+                        WorkspacePeekFoundSolutionItemKindFolder.Items = c
+                        Files = files
+                    })
+            kind
+            |> Option.map (fun k -> { WorkspacePeekFoundSolutionItem.Guid = x.Guid; Name = x.Name; Kind = k })
+        let items = sd.Items |> List.choose item
+        WorkspacePeekFound.Solution { WorkspacePeekFoundSolution.Path = p; Items = items; Configurations = [] }
 
-    let data = { WorkspacePeekResponse.Found = found |> List.map mapInt }
+  let workspacePeek (serialize : Serializer) (found: WorkspacePeek.Interesting list) =
+    let data = { WorkspacePeekResponse.Found = found |> List.map mapInteresting }
     serialize { Kind = "workspacePeek"; Data = data }
 
   let workspaceLoad (serialize : Serializer) finished =
