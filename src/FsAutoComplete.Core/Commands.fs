@@ -981,17 +981,14 @@ type Commands (checker: FSharpCompilerServiceChecker, state: State, backgroundSe
         |> x.AsCancellable tyRes.FileName
         |> AsyncResult.recoverCancellation
 
-    member x.WorkspacePeek (dir: string) (deep: int) (excludedDirs: string list) = async {
-        let d = state.ProjectController.PeekWorkspace(dir, deep, excludedDirs)
-        return CoreResponse.Res d
-    }
+    member x.WorkspacePeek (dir: string) (deep: int) (excludedDirs: string list) = state.ProjectController.PeekWorkspace(dir, deep, excludedDirs)
 
     member x.WorkspaceLoad (files: string list) (disableInMemoryProjectReferences: bool) tfmForScripts (generateBinlog: bool) = async {
         commandsLogger.info (Log.setMessage "Workspace loading started '{files}'" >> Log.addContextDestructured "files" files)
         checker.DisableInMemoryProjectReferences <- disableInMemoryProjectReferences
         state.ProjectController.LoadWorkspace(files, generateBinlog)
         commandsLogger.info (Log.setMessage "Workspace loading finished ")
-        return CoreResponse.Res true
+        return true
     }
 
     member x.Project projectFileName (generateBinlog: bool)  = async {

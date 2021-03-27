@@ -569,43 +569,35 @@ type FSharpLspServer(backgroundServiceEnabled: bool, state: State, lspClient: FS
         | _, false -> ()
         | Some p, true ->
             async {
-                let! peek = commands.WorkspacePeek p config.WorkspaceModePeekDeepLevel (List.ofArray config.ExcludeProjectDirectories)
+                let ints = commands.WorkspacePeek p config.WorkspaceModePeekDeepLevel (List.ofArray config.ExcludeProjectDirectories)
+                let serialized = CommandResponse.workspacePeek JsonSerializer.writeJson ints
+                lspClient.NotifyWorkspacePeek {Content = serialized } |> Async.Start
 
-                match peek with
-                | CoreResponse.InfoRes msg | CoreResponse.ErrorRes msg ->
+                let peeks =
+                    ints
+                    |> List.map Workspace.mapInteresting
+                    |> List.sortByDescending (fun x ->
+                        match x with
+                        | CommandResponse.WorkspacePeekFound.Solution sln -> Workspace.countProjectsInSln sln
+                        | CommandResponse.WorkspacePeekFound.Directory _ -> -1)
+
+                match peeks with
+                | [] -> ()
+                | [CommandResponse.WorkspacePeekFound.Directory projs] ->
+                    commands.WorkspaceLoad projs.Fsprojs false config.ScriptTFM config.GenerateBinlog
+                    |> Async.Ignore
+                    |> Async.Start
+                | CommandResponse.WorkspacePeekFound.Solution sln::_ ->
+                    let projs =
+                        sln.Items
+                        |> List.collect Workspace.foldFsproj
+                        |> List.map fst
+                    commands.WorkspaceLoad projs false config.ScriptTFM config.GenerateBinlog
+                    |> Async.Ignore
+                    |> Async.Start
+                | _ ->
+                    //TODO: Above case always picks solution with most projects, should be changed
                     ()
-                | CoreResponse.Res ints ->
-
-                    let serialized = CommandResponse.workspacePeek JsonSerializer.writeJson ints
-                    lspClient.NotifyWorkspacePeek {Content = serialized } |> Async.Start
-
-                    let peeks =
-                        ints
-                        |> List.map Workspace.mapInteresting
-                        |> List.sortByDescending (fun x ->
-                            match x with
-                            | CommandResponse.WorkspacePeekFound.Solution sln -> Workspace.countProjectsInSln sln
-                            | CommandResponse.WorkspacePeekFound.Directory _ -> -1)
-
-                    match peeks with
-                    | [] -> ()
-                    | [CommandResponse.WorkspacePeekFound.Directory projs] ->
-                        commands.WorkspaceLoad projs.Fsprojs false config.ScriptTFM config.GenerateBinlog
-                        |> Async.Ignore
-                        |> Async.Start
-                    | CommandResponse.WorkspacePeekFound.Solution sln::_ ->
-                        let projs =
-                            sln.Items
-                            |> List.collect Workspace.foldFsproj
-                            |> List.map fst
-                        commands.WorkspaceLoad projs false config.ScriptTFM config.GenerateBinlog
-                        |> Async.Ignore
-                        |> Async.Start
-                    | _ ->
-                        //TODO: Above case always picks solution with most projects, should be changed
-                        ()
-
-
                 return ()
             } |> Async.Start
 
@@ -1466,31 +1458,19 @@ type FSharpLspServer(backgroundServiceEnabled: bool, state: State, lspClient: FS
         logger.info (Log.setMessage "FSharpWorkspaceLoad Request: {parms}" >> Log.addContextDestructured "parms" p )
 
         let fns = p.TextDocuments |> Array.map (fun fn -> fn.GetFilePath() ) |> Array.toList
-        let! res = commands.WorkspaceLoad fns config.DisableInMemoryProjectReferences config.ScriptTFM config.GenerateBinlog
-        let res =
-            match res with
-            | CoreResponse.InfoRes msg | CoreResponse.ErrorRes msg ->
-                LspResult.internalError msg
-            | CoreResponse.Res fin ->
-                { Content =  CommandResponse.workspaceLoad FsAutoComplete.JsonSerializer.writeJson fin }
-                |> success
-
-        return res
+        let! fin = commands.WorkspaceLoad fns config.DisableInMemoryProjectReferences config.ScriptTFM config.GenerateBinlog
+        return
+          { Content =  CommandResponse.workspaceLoad FsAutoComplete.JsonSerializer.writeJson fin }
+          |> success
     }
 
     member __.FSharpWorkspacePeek(p: WorkspacePeekRequest) = async {
         logger.info (Log.setMessage "FSharpWorkspacePeek Request: {parms}" >> Log.addContextDestructured "parms" p )
 
-        let! res = commands.WorkspacePeek p.Directory p.Deep (p.ExcludedDirs |> List.ofArray)
-        let res =
-            match res with
-            | CoreResponse.InfoRes msg | CoreResponse.ErrorRes msg ->
-                LspResult.internalError msg
-            | CoreResponse.Res found ->
-                { Content =  CommandResponse.workspacePeek FsAutoComplete.JsonSerializer.writeJson found }
-                |> success
-
-        return res
+        let found = commands.WorkspacePeek p.Directory p.Deep (p.ExcludedDirs |> List.ofArray)
+        return
+          { Content =  CommandResponse.workspacePeek FsAutoComplete.JsonSerializer.writeJson found }
+          |> success
     }
 
     member __.FSharpProject(p) = async {

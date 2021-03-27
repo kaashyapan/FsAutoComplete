@@ -16,14 +16,18 @@ open FsAutoComplete.CodeFix.Types
 open System.Threading.Tasks
 open System.Threading
 open FSharp.Analyzers
+open FsAutoComplete.LspHelpers
 
+module Mapping =
+  let mapWorkspacePeek interestingItems =
+    let payload: CommandResponse.WorkspacePeekResponse = { Found = interestingItems |> List.map CommandResponse.mapInteresting }
+    let responseMessage: CommandResponse.ResponseMsg<_> = { Kind = "workspacePeek"; Data = payload }
+    responseMessage
 type FSharpLspClient(rpc: JsonRpc) =
   let logger = LogProvider.getLoggerByType typeof<FSharpLspClient>
 
   member x.NotifyWorkspacePeek(interestingItems: list<Ionide.ProjInfo.ProjectSystem.WorkspacePeek.Interesting>) =
-    let payload: CommandResponse.WorkspacePeekResponse = { Found = interestingItems |> List.map CommandResponse.mapInteresting }
-    let responseMessage: CommandResponse.ResponseMsg<_> = { Kind = "workspacePeek"; Data = payload }
-    rpc.NotifyWithParameterObjectAsync("fsharp/workspacePeek", responseMessage)
+    rpc.NotifyWithParameterObjectAsync("fsharp/workspacePeek", Mapping.mapWorkspacePeek interestingItems)
 
 type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: bool, state: State) as this =
 
@@ -121,7 +125,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
           Loggers.analyzers.info(Log.setMessage "Registered {count} analyzers from {path}" >> Log.addContextDestructured "count" newlyFound >> Log.addContextDestructured "path" path)
         let total = FSharp.Analyzers.SDK.Client.registeredAnalyzers.Count
         Loggers.analyzers.info(Log.setMessage "{count} Analyzers registered overall" >> Log.addContextDestructured "count" total)
-
 
   do
     // hook up request/response logging for debugging
@@ -252,46 +255,40 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       | None, _
       | _, false -> ()
       | Some p, true ->
-          async {
-              let! peek = commands.WorkspacePeek p config.WorkspaceModePeekDeepLevel (List.ofArray config.ExcludeProjectDirectories)
+        async {
+          let ints = commands.WorkspacePeek p config.WorkspaceModePeekDeepLevel (List.ofArray config.ExcludeProjectDirectories)
 
-              match peek with
-              | CoreResponse.InfoRes msg | CoreResponse.ErrorRes msg ->
-                  ()
-              | CoreResponse.Res ints ->
+          let serialized = CommandResponse.workspacePeek JsonSerializer.writeJson ints
+          client.NotifyWorkspacePeek ints |> ignore<Task>
 
-                  let serialized = CommandResponse.workspacePeek JsonSerializer.writeJson ints
-                  client.NotifyWorkspacePeek ints |> ignore<Task>
+          let peeks =
+              ints
+              |> List.map LspHelpers.Workspace.mapInteresting
+              |> List.sortByDescending (fun x ->
+                  match x with
+                  | CommandResponse.WorkspacePeekFound.Solution sln -> LspHelpers.Workspace.countProjectsInSln sln
+                  | CommandResponse.WorkspacePeekFound.Directory _ -> -1)
 
-                  let peeks =
-                      ints
-                      |> List.map LspHelpers.Workspace.mapInteresting
-                      |> List.sortByDescending (fun x ->
-                          match x with
-                          | CommandResponse.WorkspacePeekFound.Solution sln -> LspHelpers.Workspace.countProjectsInSln sln
-                          | CommandResponse.WorkspacePeekFound.Directory _ -> -1)
+          match peeks with
+          | [] -> ()
+          | [CommandResponse.WorkspacePeekFound.Directory projs] ->
+              commands.WorkspaceLoad projs.Fsprojs false config.ScriptTFM config.GenerateBinlog
+              |> Async.Ignore
+              |> Async.Start
+          | CommandResponse.WorkspacePeekFound.Solution sln::_ ->
+              let projs =
+                  sln.Items
+                  |> List.collect LspHelpers.Workspace.foldFsproj
+                  |> List.map fst
+              commands.WorkspaceLoad projs false config.ScriptTFM config.GenerateBinlog
+              |> Async.Ignore
+              |> Async.Start
+          | _ ->
+              //TODO: Above case always picks solution with most projects, should be changed
+              ()
+          return ()
+        } |> Async.Start
 
-                  match peeks with
-                  | [] -> ()
-                  | [CommandResponse.WorkspacePeekFound.Directory projs] ->
-                      commands.WorkspaceLoad projs.Fsprojs false config.ScriptTFM config.GenerateBinlog
-                      |> Async.Ignore
-                      |> Async.Start
-                  | CommandResponse.WorkspacePeekFound.Solution sln::_ ->
-                      let projs =
-                          sln.Items
-                          |> List.collect LspHelpers.Workspace.foldFsproj
-                          |> List.map fst
-                      commands.WorkspaceLoad projs false config.ScriptTFM config.GenerateBinlog
-                      |> Async.Ignore
-                      |> Async.Start
-                  | _ ->
-                      //TODO: Above case always picks solution with most projects, should be changed
-                      ()
-
-
-              return ()
-          } |> Async.Start
       return { InitializeResult.Default with
                 Capabilities =
                     { ServerCapabilities.Default with
@@ -337,3 +334,18 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
             }
     }
 
+  [<JsonRpcMethod("fsharp/workspacePeek", UseSingleObjectParameterDeserialization = true)>]
+  member x.FSharpWorkspacePeek(p: LspHelpers.WorkspacePeekRequest) = task {
+    let found = commands.WorkspacePeek p.Directory p.Deep (p.ExcludedDirs |> List.ofArray)
+    let mapped = Mapping.mapWorkspacePeek found
+    let serialized = JsonSerializer.writeJson mapped
+    return { PlainNotification.Content = serialized }
+  }
+
+  [<JsonRpcMethod("fsharp/workspaceLoad")>]
+  member x.FSharpWorkspaceLoad(textDocuments: TextDocumentIdentifier []) = task {
+    let fns = textDocuments |> Array.map (fun fn -> fn.GetFilePath() ) |> Array.toList
+    let _ = commands.WorkspaceLoad fns config.DisableInMemoryProjectReferences config.ScriptTFM config.GenerateBinlog
+    let status: CommandResponse.ResponseMsg<_> = { Kind = "workspaceLoad"; Data = { CommandResponse.WorkspaceLoadResponse.Status = "finished" } }
+    return { PlainNotification.Content = JsonSerializer.writeJson status }
+  }
