@@ -4,10 +4,8 @@ Newtonsoft.Json
 FSharp.Core
 Microsoft.SourceLink.GitHub
 System.Configuration.ConfigurationManager
-#FSharpLint.Core
 Ionide.ProjInfo
 Ionide.ProjInfo.ProjectSystem
-#Fake.Runtime
 Dapper
 Microsoft.Data.Sqlite
 ICSharpCode.Decompiler
@@ -20,5 +18,7 @@ Serilog.Sinks.Console
 Serilog.Sinks.Async
 Destructurama.FSharp
 FSharp.UMX
-
 Microsoft.NETFramework.ReferenceAssemblies
+StreamJsonRpc
+ply
+SerilogTraceListener

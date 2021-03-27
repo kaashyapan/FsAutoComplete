@@ -15,6 +15,7 @@
     <Compile Include="CodeFixes.fs" />
     <Compile Include="CodeFixes/*.fs" />
     <Compile Include="FsAutoComplete.Lsp.fs" />
+    <Compile Include="LspTypes.Lsp.fs" />
     <Compile Include="Program.fs" />
     <None Include="FsAutoComplete.fsproj.paket.references" />
     <Content Include="default.win32manifest">

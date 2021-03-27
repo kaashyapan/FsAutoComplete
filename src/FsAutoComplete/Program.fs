@@ -64,9 +64,12 @@ let entry args =
 
       let toolsPath = Ionide.ProjInfo.Init.init ()
       use compilerEventListener = new Debug.FSharpCompilerEventLogger.Listener()
-      let result = FsAutoComplete.Lsp.start backgroundServiceEnabled toolsPath workspaceLoaderFactory
+      //let result = FsAutoComplete.Lsp.start commands
+      let state = State.Initial toolsPath workspaceLoaderFactory
+      let server = ExternalLsp.FSharpLspServer(Console.OpenStandardOutput(), Console.OpenStandardInput(), backgroundServiceEnabled, state)
+      server.WaitForClose().GetAwaiter().GetResult()
       Serilog.Log.CloseAndFlush()
-      result
+      0
     with
     | :? ArguParseException as ex ->
       printfn "%s" ex.Message

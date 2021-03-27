@@ -2493,12 +2493,16 @@ module Server =
 
     let logger = LogProvider.getLoggerByName "LSP Server"
 
+    let customConverters: list<JsonConverter> = [
+      SingleCaseUnionConverter()
+      U2BoolObjectConverter()
+      OptionConverter()
+      ErasedUnionConverter()
+    ]
     let jsonSettings =
         let result = JsonSerializerSettings(NullValueHandling = NullValueHandling.Ignore)
-        result.Converters.Add(SingleCaseUnionConverter())
-        result.Converters.Add(U2BoolObjectConverter())
-        result.Converters.Add(OptionConverter())
-        result.Converters.Add(ErasedUnionConverter())
+        for converter in customConverters do
+          result.Converters.Add converter
         result.ContractResolver <- CamelCasePropertyNamesContractResolver()
         result
 
