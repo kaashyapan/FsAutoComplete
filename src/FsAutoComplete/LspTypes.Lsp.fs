@@ -334,7 +334,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   member x.WaitForClose() = rpc.Completion
 
   ///Helper function for handling Position requests using **recent** type check results
-  member x.positionHandler<'a, 'b when 'b :> ITextDocumentPositionParams> (f: 'b -> FcsPos -> ParseAndCheckResults -> string -> string [] ->  AsyncLspResult<'a>) (arg: 'b) : AsyncLspResult<'a> =
+  member x.positionHandler<'a, 'b when 'b :> ITextDocumentPositionParams> (f: 'b -> FcsPos -> ParseAndCheckResults -> string -> string [] ->  Async<'a>) (arg: 'b) : Async<'a> =
     async {
         let pos = arg.GetFcsPos()
         let file = arg.GetFilePath() |> Utils.normalizePath
@@ -353,14 +353,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
                         logger.info (Log.setMessage "PositionHandler - Cached typecheck results not yet available for {file}" >> Log.addContextDestructured "file" file)
                         raise (AsyncLspResult.internalError "Cached typecheck results not yet available")
                     | Some tyRes ->
-                        async {
-                            let! r = Async.Catch (f arg pos tyRes lineStr lines)
-                            match r with
-                            | Choice1Of2 r -> return r
-                            | Choice2Of2 e ->
-                                logger.error (Log.setMessage "PositionHandler - Failed during child operation on file {file}" >> Log.addContextDestructured "file" file >> Log.addExn e)
-                                return raise (AsyncLspResult.internalError e.Message)
-                        }
+                        f arg pos tyRes lineStr lines
                 with e ->
                     logger.error (Log.setMessage "PositionHandler - Operation failed for file {file}" >> Log.addContextDestructured "file" file >> Log.addExn e)
                     raise (AsyncLspResult.internalError e.Message)
@@ -620,7 +613,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   }
 
   [<JsonRpcMethod("textDocument/didChange", UseSingleObjectParameterDeserialization = true)>]
-  member _.TextDocumentDidChange(p: DidChangeTextDocumentParams, ctok) = task {
+  member _.TextDocumentDidChange(p: DidChangeTextDocumentParams, ctok: CancellationToken) = task {
     let doc = p.TextDocument
     let filePath = doc.GetFilePath() |> Utils.normalizePath
     let contentChange = p.ContentChanges |> Seq.tryLast
@@ -635,6 +628,11 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     | _ -> ()
 
     parseFileDebuncer.Bounce p
+  }
+
+  [<JsonRpcMethod("textDocument/didSave", UseSingleObjectParameterDeserialization = true)>]
+  member _.TextDocumentDidSave(p: DidSaveTextDocumentParams) = task {
+    return ()
   }
 
   [<JsonRpcMethodAttribute("fsharp/loadAnalyzers", UseSingleObjectParameterDeserialization = true)>]
@@ -681,7 +679,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   }
 
   [<JsonRpcMethod("textDocument/hover", UseSingleObjectParameterDeserialization = true)>]
-  member x.TextDocumentHover(p: TextDocumentPositionParams, ctok: CancellationToken) =
+  member x.TextDocumentHover(p: TextDocumentPositionParams, ctok: CancellationToken): Task<Hover option> =
     logger.info (Log.setMessage "TextDocumentHover Request: {parms}" >> Log.addContextDestructured "parms" p )
     p
     |> x.positionHandler (fun p pos tyRes lineStr lines ->
@@ -736,10 +734,9 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
                                     |]
                             Range = None
                         }
-                    async.Return (Ok (Some response))
-                | _ -> async.Return (Ok None)
+                    async.Return (Some response)
+                | _ -> async.Return None
     )
-    |> AsyncResult.foldResult id (fun e -> raise (AsyncLspResult.internalError e.Message))
     |> fun a -> Async.StartAsTask(a, cancellationToken = ctok)
 
   [<JsonRpcMethod("textDocument/completion", UseSingleObjectParameterDeserialization = true)>]
@@ -819,3 +816,94 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
           logger.info (Log.setMessage "TextDocumentCompletion - no completion results")
           return Some { IsIncomplete = true; Items = [||] }
     }
+
+  [<JsonRpcMethod("completionItem/resolve", UseSingleObjectParameterDeserialization = true)>]
+  member x.CompletionItemResolve(ci: CompletionItem, ctok) = task {
+    logger.info (Log.setMessage "CompletionItemResolve Request: {parms}" >> Log.addContextDestructured "parms" ci )
+    let! res = Async.StartAsTask(commands.Helptext ci.InsertText.Value, cancellationToken = ctok)
+    let res =
+        match res with
+        | CoreResponse.InfoRes msg | CoreResponse.ErrorRes msg ->
+            ci
+        | CoreResponse.Res (HelpText.Simple (name, str)) ->
+            let d = Documentation.Markup (markdown str)
+            {ci with Detail = Some name; Documentation = Some d  }
+        | CoreResponse.Res (HelpText.Full (name, tip, additionalEdit)) ->
+            let (si, comment) = (TipFormatter.formatTip tip) |> List.collect id |> List.head
+            let edits, label =
+              match additionalEdit with
+              | None -> None, ci.Label
+              | Some { Namespace = ns; Position = fcsPos } ->
+                Some [| { TextEdit.NewText = $"open {ns}"; TextEdit.Range = fcsPosToProtocolRange fcsPos } |], $"{ci.Label} (open {ns})"
+            let d = Documentation.Markup (markdown comment)
+            { ci with Detail = Some si
+                      Documentation = Some d
+                      AdditionalTextEdits = edits
+                      Label = label }
+    return res
+  }
+
+  [<JsonRpcMethod("textDocument/rename", UseSingleObjectParameterDeserialization = true)>]
+  member x.TextDocumentRename(p: RenameParams, ctok) =
+    logger.info (Log.setMessage "TextDocumentRename Request: {parms}" >> Log.addContextDestructured "parms" p )
+    p |> x.positionHandler (fun p pos tyRes lineStr lines ->
+        async {
+            let! res = commands.SymbolUseProject tyRes pos lineStr
+            let res =
+                match res with
+                | CoreResponse.InfoRes msg | CoreResponse.ErrorRes msg ->
+                    raise (AsyncLspResult.internalError msg)
+                | CoreResponse.Res (LocationResponse.Use (_, uses)) ->
+                    let documentChanges =
+                        uses
+                        |> Array.groupBy (fun sym -> sym.FileName)
+                        |> Array.map(fun (fileName, symbols) ->
+                            let edits =
+                                symbols
+                                |> Array.map (fun sym ->
+                                    let range = fcsRangeToLsp sym.RangeAlternate
+                                    let range = {range with Start = { Line = range.Start.Line; Character = range.End.Character - sym.Symbol.DisplayName.Length }}
+                                    {
+                                        Range = range
+                                        NewText = p.NewName
+                                    })
+                                |> Array.distinct
+                            {
+                                TextDocument =
+                                    {
+                                        Uri = Path.FilePathToUri fileName
+                                        Version = commands.TryGetFileVersion (UMX.tag fileName) // from compiler, is safe
+                                    }
+                                Edits = edits
+                            }
+                        )
+                    WorkspaceEdit.Create(documentChanges, clientCapabilities.Value) |> Some
+                | CoreResponse.Res (LocationResponse.UseRange uses) ->
+                    let documentChanges =
+                        uses
+                        |> Array.groupBy (fun sym -> sym.FileName)
+                        |> Array.map(fun (fileName, symbols) ->
+                            let edits =
+                                symbols
+                                |> Array.map (fun sym ->
+                                    let range = symbolUseRangeToLsp sym
+                                    let range = {range with Start = { Line = range.Start.Line; Character = range.End.Character - sym.SymbolDisplayName.Length }}
+
+                                    {
+                                        Range = range
+                                        NewText = p.NewName
+                                    })
+                                |> Array.distinct
+                            {
+                                TextDocument =
+                                    {
+                                        Uri = Path.FilePathToUri fileName
+                                        Version = commands.TryGetFileVersion (UMX.tag fileName) // from compiler, is safe
+                                    }
+                                Edits = edits
+                            }
+                        )
+                    WorkspaceEdit.Create(documentChanges, clientCapabilities.Value) |> Some
+            return res
+        })
+      |> fun a -> Async.StartAsTask(a, cancellationToken = ctok)

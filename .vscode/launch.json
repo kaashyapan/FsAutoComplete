@@ -64,7 +64,7 @@
             },
             "symbolOptions": {
               "searchPaths": [],
-              "searchMicrosoftSymbolServer": false,
+              "searchMicrosoftSymbolServer": true,
               "searchNuGetOrgSymbolServer": true
             }
         }
