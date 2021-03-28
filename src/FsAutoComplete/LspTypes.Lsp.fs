@@ -19,6 +19,7 @@ open FSharp.Analyzers
 open FsAutoComplete.LspHelpers
 open FSharp.UMX
 open Ionide.ProjInfo.ProjectSystem
+open FSharp.Compiler.SourceCodeServices
 
 type LspResult<'t> = Result<'t, StreamJsonRpc.LocalRpcException>
 type AsyncLspResult<'t> = Async<LspResult<'t>>
@@ -366,7 +367,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     }
 
 
-  // the names have to match exactly, which can suck if thye have / characters
+  // the names have to match exactly, which can suck if they have / characters
   // also, you have to match the parameters _exactly_, which means it's safer usually to have
   // a parameter-object and turn on missing member handling ignoring in the json formatter.
   [<JsonRpcMethod("initialize", UseSingleObjectParameterDeserialization = true)>]
@@ -618,6 +619,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     if config.SimplifyNameAnalyzer then Async.Start (commands.CheckSimplifiedNames filePath, ctok)
   }
 
+  [<JsonRpcMethod("textDocument/didChange", UseSingleObjectParameterDeserialization = true)>]
   member _.TextDocumentDidChange(p: DidChangeTextDocumentParams, ctok) = task {
     let doc = p.TextDocument
     let filePath = doc.GetFilePath() |> Utils.normalizePath
@@ -739,3 +741,81 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     )
     |> AsyncResult.foldResult id (fun e -> raise (AsyncLspResult.internalError e.Message))
     |> fun a -> Async.StartAsTask(a, cancellationToken = ctok)
+
+  [<JsonRpcMethod("textDocument/completion", UseSingleObjectParameterDeserialization = true)>]
+  member x.TextDocumentCompletion(p: CompletionParams, ctok) =
+    let ensureInBounds (lines: LineStr array) (line, col) =
+      let lineStr = lines.[line]
+      if line <= lines.Length && line >= 0 && col <= lineStr.Length + 1 && col >= 0
+      then ()
+      else
+        logger.info (Log.setMessage "TextDocumentCompletion Not OK:\n COL: {col}\n LINE_STR: {lineStr}\n LINE_STR_LENGTH: {lineStrLength}"
+                         >> Log.addContextDestructured "col" col
+                         >> Log.addContextDestructured "lineStr" lineStr
+                         >> Log.addContextDestructured "lineStrLength" lineStr.Length)
+
+        raise (AsyncLspResult.internalError "not ok")
+
+    task {
+      logger.info (Log.setMessage "TextDocumentCompletion Request: {context}" >> Log.addContextDestructured "context" p)
+      // Sublime-lsp doesn't like when we answer null so we answer an empty list instead
+      let file = p.TextDocument.GetFilePath() |> Utils.normalizePath
+      let pos = p.GetFcsPos()
+      let (options, lines) = commands.TryGetFileCheckerOptionsWithLines file |> Result.mapError AsyncLspResult.internalError |> Result.fold id (fun e -> raise e)
+      let line, col = p.Position.Line, p.Position.Character
+      let lineStr = lines.[line]
+      let word = lineStr.Substring(0, col)
+
+      do ensureInBounds lines (line, col)
+
+      if (lineStr.StartsWith "#" && (KeywordList.hashDirectives.Keys |> Seq.exists (fun k -> k.StartsWith word ) || word.Contains "\n" )) then
+          let completionList = { IsIncomplete = false; Items = KeywordList.hashSymbolCompletionItems }
+          return (Some completionList)
+      else
+        let! typeCheckResults =
+          match p.Context with
+          | None ->
+            commands.TryGetRecentTypeCheckResultsForFile(file, options)
+            |> Option.defaultWith (fun _ -> raise (AsyncLspResult.internalError "No typecheck results"))
+            |> Task.FromResult
+          | Some ctx ->
+              if (ctx.triggerCharacter = Some '.') then
+                  Async.StartAsTask(
+                    commands.TryGetLatestTypeCheckResultsForFile(file)
+                    |> Async.map (Option.defaultWith (fun _ -> raise (AsyncLspResult.internalError "No typecheck results"))),
+                    cancellationToken = ctok
+                  )
+              else
+                  commands.TryGetRecentTypeCheckResultsForFile(file, options)
+                  |> Option.defaultWith (fun _ -> raise (AsyncLspResult.internalError "No typecheck results"))
+                  |> Task.FromResult
+
+        match! Async.StartAsTask(commands.Completion typeCheckResults pos lineStr lines file None (config.KeywordsAutocomplete) (config.ExternalAutocomplete),
+                                 cancellationToken = ctok) with
+        | CoreResponse.Res(decls, keywords) ->
+            let items =
+                decls
+                |> Array.mapi (fun id d ->
+                    let code =
+                        if System.Text.RegularExpressions.Regex.IsMatch(d.Name, """^[a-zA-Z][a-zA-Z0-9']+$""") then d.Name
+                        elif d.NamespaceToOpen.IsSome then d.Name
+                        else FSharpKeywords.QuoteIdentifierIfNeeded d.Name
+                    let label =
+                        match d.NamespaceToOpen with
+                        | Some no -> sprintf "%s (open %s)" d.Name no
+                        | None -> d.Name
+
+                    { CompletionItem.Create(d.Name) with
+                        Kind = glyphToCompletionKind d.Glyph
+                        InsertText = Some code
+                        SortText = Some (sprintf "%06d" id)
+                        FilterText = Some d.Name
+                    }
+                )
+            let its = if not keywords then items else Array.append items KeywordList.keywordCompletionItems
+            let completionList = { IsIncomplete = false; Items = its}
+            return Some completionList
+        | _ ->
+          logger.info (Log.setMessage "TextDocumentCompletion - no completion results")
+          return Some { IsIncomplete = true; Items = [||] }
+    }
