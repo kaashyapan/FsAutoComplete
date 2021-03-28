@@ -20,6 +20,11 @@ open FsAutoComplete.LspHelpers
 open FSharp.UMX
 open Ionide.ProjInfo.ProjectSystem
 
+type LspResult<'t> = Result<'t, StreamJsonRpc.LocalRpcException>
+type AsyncLspResult<'t> = Async<LspResult<'t>>
+
+module AsyncLspResult =
+  let internalError msg = StreamJsonRpc.LocalRpcException(msg)
 module Mapping =
   let mapWorkspacePeek interestingItems =
     let payload: CommandResponse.WorkspacePeekResponse = { Found = interestingItems |> List.map CommandResponse.mapInteresting }
@@ -302,6 +307,40 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   member x.WaitForClose() = rpc.Completion
 
+  ///Helper function for handling Position requests using **recent** type check results
+  member x.positionHandler<'a, 'b when 'b :> ITextDocumentPositionParams> (f: 'b -> FcsPos -> ParseAndCheckResults -> string -> string [] ->  AsyncLspResult<'a>) (arg: 'b) : AsyncLspResult<'a> =
+    async {
+        let pos = arg.GetFcsPos()
+        let file = arg.GetFilePath() |> Utils.normalizePath
+        // logger.info (Log.setMessage "PositionHandler - Position request: {file} at {pos}" >> Log.addContextDestructured "file" file >> Log.addContextDestructured "pos" pos)
+
+        return!
+            match commands.TryGetFileCheckerOptionsWithLinesAndLineStr(file, pos) with
+            | ResultOrString.Error s ->
+                logger.error (Log.setMessage "PositionHandler - Getting file checker options for {file} failed" >> Log.addContextDestructured "error" s >> Log.addContextDestructured "file" file)
+                raise (AsyncLspResult.internalError s)
+            | ResultOrString.Ok (options, lines, lineStr) ->
+                try
+                    let tyResOpt = commands.TryGetRecentTypeCheckResultsForFile(file, options)
+                    match tyResOpt with
+                    | None ->
+                        logger.info (Log.setMessage "PositionHandler - Cached typecheck results not yet available for {file}" >> Log.addContextDestructured "file" file)
+                        raise (AsyncLspResult.internalError "Cached typecheck results not yet available")
+                    | Some tyRes ->
+                        async {
+                            let! r = Async.Catch (f arg pos tyRes lineStr lines)
+                            match r with
+                            | Choice1Of2 r -> return r
+                            | Choice2Of2 e ->
+                                logger.error (Log.setMessage "PositionHandler - Failed during child operation on file {file}" >> Log.addContextDestructured "file" file >> Log.addExn e)
+                                return raise (AsyncLspResult.internalError e.Message)
+                        }
+                with e ->
+                    logger.error (Log.setMessage "PositionHandler - Operation failed for file {file}" >> Log.addContextDestructured "file" file >> Log.addExn e)
+                    raise (AsyncLspResult.internalError e.Message)
+    }
+
+
   // the names have to match exactly, which can suck if thye have / characters
   // also, you have to match the parameters _exactly_, which means it's safer usually to have
   // a parameter-object and turn on missing member handling ignoring in the json formatter.
@@ -509,10 +548,152 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     return { PlainNotification.Content = serialized }
   }
 
-  [<JsonRpcMethod("fsharp/workspaceLoad")>]
-  member x.FSharpWorkspaceLoad(textDocuments: TextDocumentIdentifier []) = task {
-    let fns = textDocuments |> Array.map (fun fn -> fn.GetFilePath() ) |> Array.toList
-    let _ = commands.WorkspaceLoad fns config.DisableInMemoryProjectReferences config.ScriptTFM config.GenerateBinlog
+  [<JsonRpcMethod("fsharp/workspaceLoad", UseSingleObjectParameterDeserialization = true)>]
+  member x.FSharpWorkspaceLoad(p: LspHelpers.WorkspaceLoadParms) = task {
+    let fns = p.TextDocuments |> Array.map (fun fn -> fn.GetFilePath() ) |> Array.toList
+    let! _ = commands.WorkspaceLoad fns config.DisableInMemoryProjectReferences config.ScriptTFM config.GenerateBinlog
     let status: CommandResponse.ResponseMsg<_> = { Kind = "workspaceLoad"; Data = { CommandResponse.WorkspaceLoadResponse.Status = "finished" } }
     return { PlainNotification.Content = JsonSerializer.writeJson status }
   }
+
+  [<JsonRpcMethod("initialized")>]
+  member _.Initialized() = task {
+    return ()
+  }
+
+  [<JsonRpcMethod("workspace/didChangeConfiguration", UseSingleObjectParameterDeserialization = true)>]
+  member _.WorkspaceDidChangeConfiguration(workspaceSettings: DidChangeConfigurationParams) = task {
+    let dto = LanguageServerProtocol.Server.deserialize<FSharpConfigRequest> workspaceSettings.Settings
+    logger.info (Log.setMessage "WorkspaceDidChangeConfiguration Request: {parms}" >> Log.addContextDestructured "parms" dto)
+    let c = config.AddDto dto.FSharp
+    updateConfig c
+    return ()
+  }
+
+  [<JsonRpcMethod("textDocument/didOpen", UseSingleObjectParameterDeserialization = true)>]
+  member _.TextDocumentDidOpen(p: DidOpenTextDocumentParams, ctok) = task {
+    let doc = p.TextDocument
+    let filePath = doc.GetFilePath() |> Utils.normalizePath
+    let content = doc.Text.Split('\n')
+    let tfmConfig = config.UseSdkScripts
+    logger.info (Log.setMessage "TextDocumentDidOpen Request: {parms}" >> Log.addContextDestructured "parms" filePath )
+
+    commands.SetFileContent(filePath, content, Some doc.Version, config.ScriptTFM)
+
+    do!
+      Async.StartAsTask(
+        (commands.Parse filePath content doc.Version (Some tfmConfig)
+         |> Async.Ignore),
+        cancellationToken = ctok
+      )
+
+    // if config.Linter then do! (commands.Lint filePath |> Async.Ignore)
+    if config.UnusedOpensAnalyzer then Async.Start (commands.CheckUnusedOpens filePath, ctok)
+    if config.UnusedDeclarationsAnalyzer then Async.Start (commands.CheckUnusedDeclarations filePath, ctok)
+    if config.SimplifyNameAnalyzer then Async.Start (commands.CheckSimplifiedNames filePath, ctok)
+  }
+
+  [<JsonRpcMethodAttribute("fsharp/loadAnalyzers", UseSingleObjectParameterDeserialization = true)>]
+  member _.FSharpLoadAnalyzers(path: {| Project : {| Uri: string |} |}) = task {
+    logger.info (Log.setMessage "LoadAnalyzers Request: {parms}" >> Log.addContextDestructured "parms" path )
+    try
+        if config.EnableAnalyzers
+        then
+          Loggers.analyzers.info (Log.setMessage "Using analyzer roots of {roots}" >> Log.addContextDestructured "roots" config.AnalyzersPath)
+          config.AnalyzersPath
+          |> Array.iter (fun analyzerPath ->
+              match rootPath with
+              | None -> ()
+              | Some workspacePath ->
+                  let dir =
+                    if System.IO.Path.IsPathRooted analyzerPath
+                    // if analyzer is using absolute path, use it as is
+                    then analyzerPath
+                    // otherwise, it is a relative path and should be combined with the workspace path
+                    else System.IO.Path.Combine(workspacePath, analyzerPath)
+                  Loggers.analyzers.info (Log.setMessage "Loading analyzers from {dir}" >> Log.addContextDestructured "dir" dir)
+                  let (n,m) = dir |> FSharp.Analyzers.SDK.Client.loadAnalyzers
+                  Loggers.analyzers.info (Log.setMessage "From {name}: {dllNo} dlls including {analyzersNo} analyzers" >> Log.addContextDestructured "name" analyzerPath >> Log.addContextDestructured "dllNo" n >> Log.addContextDestructured "analyzersNo" m)
+          )
+        else
+          Loggers.analyzers.info (Log.setMessage "Analyzers disabled")
+    with
+    | ex ->
+      Loggers.analyzers.error (Log.setMessage "Loading failed" >> Log.addExn ex)
+  }
+
+  [<JsonRpcMethodAttribute("textDocument/documentsymbol")>]
+  member _.TextDocumentDocumentSymbol(textDocument: TextDocumentIdentifier) = task {
+    logger.info (Log.setMessage "TextDocumentDocumentSymbol Request: {doc}" >> Log.addContextDestructured "doc" textDocument)
+    let fn = textDocument.GetFilePath() |> Utils.normalizePath
+    let! res = commands.Declarations fn None (commands.TryGetFileVersion fn)
+    match res with
+    | CoreResponse.InfoRes msg | CoreResponse.ErrorRes msg ->
+        return raise (StreamJsonRpc.LocalRpcException(msg, ErrorCode = 1))
+    | CoreResponse.Res decls ->
+        return
+          decls
+          |> Array.collect (fst >> fun top -> getSymbolInformations textDocument.Uri glyphToSymbolKind top (fun s -> true))
+  }
+
+  [<JsonRpcMethod("textDocument/hover", UseSingleObjectParameterDeserialization = true)>]
+  member x.TextDocumentHover(p: TextDocumentPositionParams, ctok: CancellationToken) =
+    logger.info (Log.setMessage "TextDocumentHover Request: {parms}" >> Log.addContextDestructured "parms" p )
+    p
+    |> x.positionHandler (fun p pos tyRes lineStr lines ->
+            match commands.ToolTip tyRes pos lineStr with
+            | CoreResponse.InfoRes msg | CoreResponse.ErrorRes msg ->
+                async { return raise (AsyncLspResult.internalError msg) }
+            | CoreResponse.Res(tip, signature, footer, typeDoc) ->
+                let formatCommentStyle =
+                    if config.TooltipMode = "full" then
+                        TipFormatter.FormatCommentStyle.FullEnhanced
+                    else if config.TooltipMode = "summary" then
+                        TipFormatter.FormatCommentStyle.SummaryOnly
+                    else
+                        TipFormatter.FormatCommentStyle.Legacy
+
+                match TipFormatter.formatTipEnhanced tip signature footer typeDoc formatCommentStyle with
+                | (sigCommentFooter::_)::_ ->
+                    let signature, comment, footer = sigCommentFooter
+                    let markStr lang (value:string) = MarkedString.WithLanguage { Language = lang ; Value = value }
+                    let fsharpBlock (lines: string[]) = lines |> String.concat "\n" |> markStr "fsharp"
+
+                    let sigContent =
+                        let lines =
+                            signature.Split '\n'
+                            |> Array.filter (not << String.IsNullOrWhiteSpace)
+
+                        match lines |> Array.splitAt (lines.Length - 1) with
+                        | (h, [| StartsWith "Full name:" fullName |]) ->
+                            [| yield fsharpBlock h
+                               yield MarkedString.String ("*" + fullName + "*") |]
+                        | _ -> [| fsharpBlock lines |]
+
+
+                    let commentContent =
+                        comment
+                        |> MarkedString.String
+
+                    let footerContent =
+                        footer.Split '\n'
+                        |> Array.filter (not << String.IsNullOrWhiteSpace)
+                        |> Array.map (fun n -> MarkedString.String ("*" + n + "*"))
+
+
+                    let response =
+                        {
+                            Contents =
+                                MarkedStrings
+                                    [|
+                                        yield! sigContent
+                                        yield commentContent
+                                        yield! footerContent
+                                    |]
+                            Range = None
+                        }
+                    async.Return (Ok (Some response))
+                | _ -> async.Return (Ok None)
+    )
+    |> AsyncResult.foldResult id (fun e -> raise (AsyncLspResult.internalError e.Message))
+    |> fun a -> Async.StartAsTask(a, cancellationToken = ctok)
