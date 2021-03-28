@@ -102,31 +102,27 @@ type FSharpLspServer(backgroundServiceEnabled: bool, state: State, lspClient: FS
 
 
     let parseFile (p: DidChangeTextDocumentParams) =
+      async {
+        let doc = p.TextDocument
+        let filePath = doc.GetFilePath() |> Utils.normalizePath
+        let contentChange = p.ContentChanges |> Seq.tryLast
+        match contentChange, doc.Version with
+        | Some contentChange, Some version ->
+            if contentChange.Range.IsNone && contentChange.RangeLength.IsNone then
+                let content = contentChange.Text.Split('\n')
+                let tfmConfig = config.UseSdkScripts
+                logger.info (Log.setMessage "ParseFile - Parsing {file}" >> Log.addContextDestructured "file" filePath)
+                do! (commands.Parse filePath content version (Some tfmConfig) |> Async.Ignore)
 
-        async {
-            if not commands.IsWorkspaceReady && rootPath.IsSome then
-                logger.warn (Log.setMessage "ParseFile - Workspace not ready")
+                // if config.Linter then do! (commands.Lint filePath |> Async.Ignore)
+                if config.UnusedOpensAnalyzer then  Async.Start (commands.CheckUnusedOpens filePath)
+                if config.UnusedDeclarationsAnalyzer then Async.Start (commands.CheckUnusedDeclarations filePath) //fire and forget this analyzer now that it's syncronous
+                if config.SimplifyNameAnalyzer then Async.Start (commands.CheckSimplifiedNames filePath)
             else
-                let doc = p.TextDocument
-                let filePath = doc.GetFilePath() |> Utils.normalizePath
-                let contentChange = p.ContentChanges |> Seq.tryLast
-                match contentChange, doc.Version with
-                | Some contentChange, Some version ->
-                    if contentChange.Range.IsNone && contentChange.RangeLength.IsNone then
-                        let content = contentChange.Text.Split('\n')
-                        let tfmConfig = config.UseSdkScripts
-                        logger.info (Log.setMessage "ParseFile - Parsing {file}" >> Log.addContextDestructured "file" filePath)
-                        do! (commands.Parse filePath content version (Some tfmConfig) |> Async.Ignore)
-
-                        // if config.Linter then do! (commands.Lint filePath |> Async.Ignore)
-                        if config.UnusedOpensAnalyzer then  Async.Start (commands.CheckUnusedOpens filePath)
-                        if config.UnusedDeclarationsAnalyzer then Async.Start (commands.CheckUnusedDeclarations filePath) //fire and forget this analyzer now that it's syncronous
-                        if config.SimplifyNameAnalyzer then Async.Start (commands.CheckSimplifiedNames filePath)
-                    else
-                        logger.warn (Log.setMessage "ParseFile - Parse not started, received partial change")
-                | _ ->
-                    logger.info (Log.setMessage "ParseFile - Found no change for {file}" >> Log.addContextDestructured "file" filePath)
-        } |> Async.Start
+                logger.warn (Log.setMessage "ParseFile - Parse not started, received partial change")
+        | _ ->
+            logger.info (Log.setMessage "ParseFile - Found no change for {file}" >> Log.addContextDestructured "file" filePath)
+      } |> Async.Start
 
     let parseFileDebuncer = Debounce(500, parseFile)
 
@@ -676,7 +672,7 @@ type FSharpLspServer(backgroundServiceEnabled: bool, state: State, lspClient: FS
         if config.SimplifyNameAnalyzer then Async.Start (commands.CheckSimplifiedNames filePath)
     }
 
-    override __.TextDocumentDidChange(p) = async {
+    override __.TextDocumentDidChange(p: DidChangeTextDocumentParams) = async {
 
         let doc = p.TextDocument
         let filePath = doc.GetFilePath() |> Utils.normalizePath

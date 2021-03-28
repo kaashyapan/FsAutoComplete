@@ -296,6 +296,31 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
         let total = FSharp.Analyzers.SDK.Client.registeredAnalyzers.Count
         Loggers.analyzers.info(Log.setMessage "{count} Analyzers registered overall" >> Log.addContextDestructured "count" total)
 
+  let parseFile (p: DidChangeTextDocumentParams) =
+    async {
+      let doc = p.TextDocument
+      let filePath = doc.GetFilePath() |> Utils.normalizePath
+      let contentChange = p.ContentChanges |> Seq.tryLast
+      match contentChange, doc.Version with
+      | Some contentChange, Some version ->
+          if contentChange.Range.IsNone && contentChange.RangeLength.IsNone then
+              let content = contentChange.Text.Split('\n')
+              let tfmConfig = config.UseSdkScripts
+              logger.info (Log.setMessage "ParseFile - Parsing {file}" >> Log.addContextDestructured "file" filePath)
+              do! (commands.Parse filePath content version (Some tfmConfig) |> Async.Ignore)
+
+              // if config.Linter then do! (commands.Lint filePath |> Async.Ignore)
+              if config.UnusedOpensAnalyzer then  Async.Start (commands.CheckUnusedOpens filePath)
+              if config.UnusedDeclarationsAnalyzer then Async.Start (commands.CheckUnusedDeclarations filePath) //fire and forget this analyzer now that it's syncronous
+              if config.SimplifyNameAnalyzer then Async.Start (commands.CheckSimplifiedNames filePath)
+          else
+              logger.warn (Log.setMessage "ParseFile - Parse not started, received partial change")
+      | _ ->
+          logger.info (Log.setMessage "ParseFile - Found no change for {file}" >> Log.addContextDestructured "file" filePath)
+    } |> Async.Start
+
+  let parseFileDebuncer = Debounce(500, parseFile)
+
   do
     // hook up request/response logging for debugging
     rpc.TraceSource <- new TraceSource(typeof<FSharpLspServer>.Name, SourceLevels.Verbose)
@@ -552,7 +577,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   member x.FSharpWorkspaceLoad(p: LspHelpers.WorkspaceLoadParms) = task {
     let fns = p.TextDocuments |> Array.map (fun fn -> fn.GetFilePath() ) |> Array.toList
     let! _ = commands.WorkspaceLoad fns config.DisableInMemoryProjectReferences config.ScriptTFM config.GenerateBinlog
-    let status: CommandResponse.ResponseMsg<_> = { Kind = "workspaceLoad"; Data = { CommandResponse.WorkspaceLoadResponse.Status = "finished" } }
+    let status: CommandResponse.ResponseMsg<_> = { Kind = "workspaceLoad"; Data = { CommandResponse.WorkspaceLoadResponse.Status = "started" } }
     return { PlainNotification.Content = JsonSerializer.writeJson status }
   }
 
@@ -591,6 +616,23 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     if config.UnusedOpensAnalyzer then Async.Start (commands.CheckUnusedOpens filePath, ctok)
     if config.UnusedDeclarationsAnalyzer then Async.Start (commands.CheckUnusedDeclarations filePath, ctok)
     if config.SimplifyNameAnalyzer then Async.Start (commands.CheckSimplifiedNames filePath, ctok)
+  }
+
+  member _.TextDocumentDidChange(p: DidChangeTextDocumentParams, ctok) = task {
+    let doc = p.TextDocument
+    let filePath = doc.GetFilePath() |> Utils.normalizePath
+    let contentChange = p.ContentChanges |> Seq.tryLast
+
+    logger.info (Log.setMessage "TextDocumentDidChange Request: {parms}" >> Log.addContextDestructured "parms" filePath )
+    match contentChange, doc.Version with
+    | Some contentChange, Some version ->
+        if contentChange.Range.IsNone && contentChange.RangeLength.IsNone then
+            let content = contentChange.Text.Split('\n')
+            commands.SetFileContent(filePath, content, Some version, config.ScriptTFM)
+        else ()
+    | _ -> ()
+
+    parseFileDebuncer.Bounce p
   }
 
   [<JsonRpcMethodAttribute("fsharp/loadAnalyzers", UseSingleObjectParameterDeserialization = true)>]
