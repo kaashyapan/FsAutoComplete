@@ -1667,37 +1667,6 @@ type FSharpLspServer(backgroundServiceEnabled: bool, state: State, lspClient: FS
               |> async.Return
           | Error e -> AsyncLspResult.internalError e
 
-
-    // member __.FakeTargets(p:FakeTargetsRequest) = async {
-    //     logger.info (Log.setMessage "FakeTargets Request: {parms}" >> Log.addContextDestructured "parms" p )
-
-    //     let! res = commands.FakeTargets (p.FileName |> Utils.normalizePath) (p.FakeContext)
-    //     let res =
-    //         match res with
-    //         | CoreResponse.InfoRes msg | CoreResponse.ErrorRes msg ->
-    //             LspResult.internalError msg
-    //         | CoreResponse.Res (targets) ->
-    //             { Content = CommandResponse.fakeTargets FsAutoComplete.JsonSerializer.writeJson targets }
-    //             |> success
-
-    //     return res
-    // }
-
-    // member __.FakeRuntimePath(p) = async {
-    //     logger.info (Log.setMessage "FakeRuntimePath Request: {parms}" >> Log.addContextDestructured "parms" p )
-
-
-    //     let! res = commands.FakeRuntime ()
-    //     let res =
-    //         match res with
-    //         | CoreResponse.InfoRes msg | CoreResponse.ErrorRes msg ->
-    //             LspResult.internalError msg
-    //         | CoreResponse.Res (runtimePath) ->
-    //             { Content = CommandResponse.fakeRuntime FsAutoComplete.JsonSerializer.writeJson runtimePath }
-    //             |> success
-    //     return res
-    // }
-
     member __.LoadAnalyzers(path) = async {
         logger.info (Log.setMessage "LoadAnalyzers Request: {parms}" >> Log.addContextDestructured "parms" path )
 

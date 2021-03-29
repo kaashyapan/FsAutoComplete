@@ -1446,3 +1446,85 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       logger.info (Log.setMessage "Workspace configuration changed" >> Log.addContextDestructured "config" c)
       return ()
     }
+
+  [<RpcMethod("textDocument/foldingRange")>]
+  member x.TextDocumentFoldingRange(rangeP: FoldingRangeParams, ctok: CancellationToken) =
+    task {
+      logger.info (Log.setMessage "TextDocumentFoldingRange Request: {parms}" >> Log.addContextDestructured "parms" rangeP)
+      let file = rangeP.TextDocument.GetFilePath() |> Utils.normalizePath
+
+      match! commands.ScopesForFile file |> Async.startTaskWithCancel ctok with
+      | Ok scopes ->
+          let ranges = scopes |> Seq.map Structure.toFoldingRange |> Set.ofSeq |> List.ofSeq
+          return Some ranges
+      | Result.Error error -> return raise (AsyncLspResult.internalError error)
+    }
+
+  [<RpcMethod("textDocument/selectionRange")>]
+  member __.TextDocumentSelectionRange(selectionRangeP: SelectionRangeParams, ctok: CancellationToken) =
+    task {
+      logger.info (Log.setMessage "TextDocumentSelectionRange Request: {parms}" >> Log.addContextDestructured "parms" selectionRangeP)
+
+      let rec mkSelectionRanges =
+        function
+        | [] -> None
+        | r :: xs -> Some { Range = fcsRangeToLsp r; Parent = mkSelectionRanges xs }
+
+      let file = selectionRangeP.TextDocument.GetFilePath() |> Utils.normalizePath
+      let poss = selectionRangeP.Positions |> Array.map protocolPosToPos |> Array.toList
+      let! ranges = commands.GetRangesAtPosition file poss |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+      let response = ranges |> List.choose mkSelectionRanges
+      return Some response
+    }
+
+  [<RpcMethod("fsharp/signature")>]
+  member x.FSharpSignature(p: TextDocumentPositionParams, ctok) =
+    logger.info (Log.setMessage "FSharpSignature Request: {parms}" >> Log.addContextDestructured "parms" p)
+
+    p
+    |> x.positionHandler
+         (fun p pos tyRes lineStr lines ->
+           let tip = commands.Typesig tyRes pos lineStr |> CoreResponse.toRpcError
+           { Content = CommandResponse.typeSig FsAutoComplete.JsonSerializer.writeJson tip } |> async.Return)
+    |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("fsharp/signatureData")>]
+  member x.FSharpSignatureData(p: TextDocumentPositionParams, ctok) =
+    logger.info (Log.setMessage "FSharpSignatureData Request: {parms}" >> Log.addContextDestructured "parms" p )
+
+    let handler f (arg: TextDocumentPositionParams) =
+      async {
+          let pos = FcsPos.mkPos (p.Position.Line) (p.Position.Character + 2)
+          let file = p.TextDocument.GetFilePath() |> Utils.normalizePath
+          logger.info (Log.setMessage "FSharpSignatureData - Position request for {file} at {pos}" >> Log.addContextDestructured "file" file >> Log.addContextDestructured "pos" pos)
+          return!
+              match commands.TryGetFileCheckerOptionsWithLinesAndLineStr(file, pos) with
+              | ResultOrString.Error s ->
+                  raise (AsyncLspResult.internalError "No options")
+              | ResultOrString.Ok (options, _, lineStr) ->
+                  try
+                      async {
+                          let! tyResOpt = commands.TryGetLatestTypeCheckResultsForFile(file)
+                          return!
+                              match tyResOpt with
+                              | None ->
+                                  raise (AsyncLspResult.internalError "No typecheck results")
+                              | Some tyRes ->
+                                  async {
+                                      let! r = Async.Catch (f arg pos tyRes lineStr)
+                                      match r with
+                                      | Choice1Of2 r -> return r
+                                      | Choice2Of2 e ->
+                                          return raise (AsyncLspResult.internalError e.Message)
+                                  }
+                      }
+                  with e ->
+                      raise (AsyncLspResult.internalError e.Message)
+      }
+
+    p |> handler (fun p pos tyRes lineStr ->
+      let (typ, parms, generics) = commands.SignatureData tyRes pos lineStr |> CoreResponse.toRpcError
+      { Content =  CommandResponse.signatureData FsAutoComplete.JsonSerializer.writeJson (typ, parms, generics) }
+      |> async.Return
+    )
+    |> Async.startTaskWithCancel ctok
