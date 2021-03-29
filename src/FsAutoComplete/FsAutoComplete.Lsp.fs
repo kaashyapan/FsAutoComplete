@@ -884,7 +884,7 @@ type FSharpLspServer(backgroundServiceEnabled: bool, state: State, lspClient: FS
                     | _ -> async.Return (success None)
             )
 
-    override x.TextDocumentRename(p) =
+    override x.TextDocumentRename(p: RenameParams) =
         logger.info (Log.setMessage "TextDocumentRename Request: {parms}" >> Log.addContextDestructured "parms" p )
         p |> x.positionHandler (fun p pos tyRes lineStr lines ->
             async {
