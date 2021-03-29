@@ -18,6 +18,13 @@ trim_trailing_whitespace = false
 
 [*.fs]
 indent_size = 2
-
-[*.fsx]
-indent_size = 2
+max_line_length=120
+fsharp_space_before_parameter=true
+fsharp_max_if_then_else_short_width=100
+fsharp_max_infix_operator_expression=100
+fsharp_max_record_width=100
+fsharp_max_array_or_list_width=100
+fsharp_max_value_binding_width=100
+fsharp_max_function_binding_width=100
+fsharp_max_dot_get_expression_width=80
+fsharp_disable_elmish_syntax=true
