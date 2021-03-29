@@ -1100,31 +1100,6 @@ type FSharpLspServer(backgroundServiceEnabled: bool, state: State, lspClient: FS
             return LspResult.notImplemented
     }
 
-    member private x.HandleTypeCheckCodeAction file pos f =
-        async {
-                return!
-                    match commands.TryGetFileCheckerOptionsWithLinesAndLineStr(file, pos) with
-                    | ResultOrString.Error s ->
-                        async.Return []
-                    | ResultOrString.Ok (options, lines, lineStr) ->
-                        try
-                            async {
-                                let! tyResOpt = commands.TryGetLatestTypeCheckResultsForFile(file)
-                                match tyResOpt with
-                                | None ->
-                                    return []
-                                | Some tyRes ->
-                                        let! r = Async.Catch (f tyRes lineStr lines)
-                                        match r with
-                                        | Choice1Of2 r -> return (List.singleton r)
-                                        | Choice2Of2 e ->
-                                            return []
-
-                            }
-                        with e ->
-                            async.Return []
-            }
-
     override x.TextDocumentCodeAction(codeActionParams: CodeActionParams) =
         logger.info (Log.setMessage "TextDocumentCodeAction Request: {parms}" >> Log.addContextDestructured "parms" codeActionParams )
 

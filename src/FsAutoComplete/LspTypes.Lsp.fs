@@ -21,6 +21,15 @@ open FSharp.UMX
 open Ionide.ProjInfo.ProjectSystem
 open FSharp.Compiler.SourceCodeServices
 
+module FcsRange = FSharp.Compiler.Text.Range
+type FcsRange = FSharp.Compiler.Text.Range
+module FcsPos = FSharp.Compiler.Text.Pos
+type FcsPos = FSharp.Compiler.Text.Pos
+
+/// I got really tired of adding the dang property to everything
+type RpcMethodAttribute(name: string) =
+  inherit JsonRpcMethodAttribute(name, UseSingleObjectParameterDeserialization = true)
+
 type LspResult<'t> = Result<'t, StreamJsonRpc.LocalRpcException>
 type AsyncLspResult<'t> = Async<LspResult<'t>>
 
@@ -30,19 +39,19 @@ type Async =
 module AsyncLspResult =
   let internalError msg = StreamJsonRpc.LocalRpcException(msg)
 
+module CoreResponse =
+  let toRpcError =
+    function
+    | CoreResponse.Res a -> a
+    | CoreResponse.ErrorRes msg
+    | CoreResponse.InfoRes msg -> raise (AsyncLspResult.internalError msg)
+
 module AsyncResult =
-  let ofCoreResponse (ar: Async<CoreResponse<'a>>) =
-    ar
-    |> Async.map
-         (function
-         | CoreResponse.Res a -> a
-         | CoreResponse.ErrorRes msg
-         | CoreResponse.InfoRes msg -> raise (AsyncLspResult.internalError msg))
+  let ofCoreResponse (ar: Async<CoreResponse<'a>>) = ar |> Async.map CoreResponse.toRpcError
 
 module Mapping =
   let mapWorkspacePeek interestingItems =
-    let payload : CommandResponse.WorkspacePeekResponse =
-      { Found = interestingItems |> List.map CommandResponse.mapInteresting }
+    let payload : CommandResponse.WorkspacePeekResponse = { Found = interestingItems |> List.map CommandResponse.mapInteresting }
 
     let responseMessage : CommandResponse.ResponseMsg<_> = { Kind = "workspacePeek"; Data = payload }
     responseMessage
@@ -54,7 +63,10 @@ type FSharpLspClient(rpc: JsonRpc) =
     rpc.NotifyWithParameterObjectAsync("fsharp/workspacePeek", Mapping.mapWorkspacePeek interestingItems)
 
   member x.TextDocumentPublishDiagnostics(uri: DocumentUri, diagnostics: Diagnostic []) =
-    rpc.NotifyAsync("textDocument/publishiDagnostics", uri, diagnostics)
+    rpc.NotifyWithParameterObjectAsync(
+      "textDocument/publishDiagnostics",
+      ({ Diagnostics = diagnostics; Uri = uri }: PublishDiagnosticsParams)
+    )
 
   member x.NotifyFileParsed(localPath: string<LocalPath>) =
     rpc.NotifyWithParameterObjectAsync("fsharp/fileParsed", { Content = UMX.untag localPath })
@@ -63,17 +75,14 @@ type FSharpLspClient(rpc: JsonRpc) =
     let payload =
       match project with
       | ProjectResponse.Project (x, _) -> CommandResponse.project JsonSerializer.writeJson x
-      | ProjectResponse.ProjectError (_, errorDetails) ->
-          CommandResponse.projectError JsonSerializer.writeJson errorDetails
-      | ProjectResponse.ProjectLoading (projectFileName) ->
-          CommandResponse.projectLoading JsonSerializer.writeJson projectFileName
+      | ProjectResponse.ProjectError (_, errorDetails) -> CommandResponse.projectError JsonSerializer.writeJson errorDetails
+      | ProjectResponse.ProjectLoading (projectFileName) -> CommandResponse.projectLoading JsonSerializer.writeJson projectFileName
       | ProjectResponse.WorkspaceLoad (finished) -> CommandResponse.workspaceLoad JsonSerializer.writeJson finished
       | ProjectResponse.ProjectChanged (projectFileName) -> failwith "Not Implemented"
 
     rpc.NotifyWithParameterObjectAsync("fsharp/notifyWorkspace", { Content = payload })
 
-  member x.NotifyCancelledRequest(message: string) =
-    rpc.NotifyWithParameterObjectAsync("fsharp/notifyCancel", { Content = message })
+  member x.NotifyCancelledRequest(message: string) = rpc.NotifyWithParameterObjectAsync("fsharp/notifyCancel", { Content = message })
 
 type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: bool, state: State) as this =
 
@@ -103,8 +112,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     else
       BackgroundServices.MockBackgroundService() :> _
 
-  let mutable commands =
-    new Commands(FSharpCompilerServiceChecker(backgroundServiceEnabled, false), state, backgroundService, false)
+  let mutable commands = new Commands(FSharpCompilerServiceChecker(backgroundServiceEnabled, false), state, backgroundService, false)
 
   let mutable commandDisposables = ResizeArray()
 
@@ -118,11 +126,10 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   let mutable codeFixes = fun p -> [||]
 
   //TODO: Thread safe version
-  let lintFixes =
-    System.Collections.Generic.Dictionary<DocumentUri, (LanguageServerProtocol.Types.Range * TextEdit) list>()
+  let lintFixes = System.Collections.Generic.Dictionary<DocumentUri, (LanguageServerProtocol.Types.Range * TextEdit) list>()
 
   let analyzerFixes =
-    System.Collections.Generic.Dictionary<DocumentUri, System.Collections.Generic.Dictionary<string, (LanguageServerProtocol.Types.Range * TextEdit) list>>
+    System.Collections.Generic.Dictionary<DocumentUri, System.Collections.Generic.Dictionary<DocumentUri, (LanguageServerProtocol.Types.Range * TextEdit) list>>
       ()
 
   let diagnosticCollections = System.Collections.Concurrent.ConcurrentDictionary<DocumentUri * string, Diagnostic []>()
@@ -183,8 +190,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       | NotificationEvent.UnusedDeclarations (file, decls) ->
           let uri = Path.LocalPathToUri file
 
-          diagnosticCollections.AddOrUpdate((uri, "F# Unused declarations"), [||], (fun _ _ -> [||]))
-          |> ignore
+          diagnosticCollections.AddOrUpdate((uri, "F# Unused declarations"), [||], (fun _ _ -> [||])) |> ignore
 
           let diags =
             decls
@@ -198,8 +204,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
                      RelatedInformation = Some [||]
                      Tags = Some [| DiagnosticTag.Unnecessary |] })
 
-          diagnosticCollections.AddOrUpdate((uri, "F# Unused declarations"), diags, (fun _ _ -> diags))
-          |> ignore
+          diagnosticCollections.AddOrUpdate((uri, "F# Unused declarations"), diags, (fun _ _ -> diags)) |> ignore
 
           sendDiagnostics uri
 
@@ -278,10 +283,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
               let aName = messages.[0].Type
 
-              if analyzerFixes.ContainsKey uri then
-                ()
-              else
-                analyzerFixes.[uri] <- new System.Collections.Generic.Dictionary<_, _>()
+              if analyzerFixes.ContainsKey uri then () else analyzerFixes.[uri] <- new System.Collections.Generic.Dictionary<_, _>()
 
               analyzerFixes.[uri].[aName] <- fs
 
@@ -332,9 +334,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
         let total = SDK.Client.registeredAnalyzers.Count
 
-        Loggers.analyzers.info (
-          Log.setMessage "{count} Analyzers registered overall" >> Log.addContextDestructured "count" total
-        )
+        Loggers.analyzers.info (Log.setMessage "{count} Analyzers registered overall" >> Log.addContextDestructured "count" total)
 
     let hasAnalyzersNow = SDK.Client.registeredAnalyzers.Count <> 0
 
@@ -343,12 +343,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       let oldDisposables = commandDisposables
 
       let newCommands =
-        new Commands(
-          FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzersNow),
-          state,
-          backgroundService,
-          hasAnalyzersNow
-        )
+        new Commands(FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzersNow), state, backgroundService, hasAnalyzersNow)
 
       commands <- newCommands
       commandDisposables <- ResizeArray()
@@ -370,12 +365,10 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       // then use the parent directory as the dotnet root instead
       let fi = FileInfo(di.FullName)
 
-      if fi.Exists && (fi.Name = "dotnet" || fi.Name = "dotnet.exe") then
-        commands.SetDotnetSDKRoot(fi.Directory)
+      if fi.Exists && (fi.Name = "dotnet" || fi.Name = "dotnet.exe") then commands.SetDotnetSDKRoot(fi.Directory)
 
     commands.SetFSIAdditionalArguments
-      [| yield! config.FSICompilerToolLocations |> Array.map toCompilerToolArgument
-         yield! config.FSIExtraParameters |]
+      [| yield! config.FSICompilerToolLocations |> Array.map toCompilerToolArgument; yield! config.FSIExtraParameters |]
 
     commands.SetLinterConfigRelativePath config.LinterConfig
 
@@ -395,9 +388,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
         let total = FSharp.Analyzers.SDK.Client.registeredAnalyzers.Count
 
-        Loggers.analyzers.info (
-          Log.setMessage "{count} Analyzers registered overall" >> Log.addContextDestructured "count" total
-        )
+        Loggers.analyzers.info (Log.setMessage "{count} Analyzers registered overall" >> Log.addContextDestructured "count" total)
 
   let parseFile (p: DidChangeTextDocumentParams) =
     async {
@@ -419,11 +410,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
             if config.SimplifyNameAnalyzer then Async.Start(commands.CheckSimplifiedNames filePath)
           else
             logger.warn (Log.setMessage "ParseFile - Parse not started, received partial change")
-      | _ ->
-          logger.info (
-            Log.setMessage "ParseFile - Found no change for {file}"
-            >> Log.addContextDestructured "file" filePath
-          )
+      | _ -> logger.info (Log.setMessage "ParseFile - Found no change for {file}" >> Log.addContextDestructured "file" filePath)
     }
     |> Async.Start
 
@@ -529,7 +516,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   // the names have to match exactly, which can suck if they have / characters
   // also, you have to match the parameters _exactly_, which means it's safer usually to have
   // a parameter-object and turn on missing member handling ignoring in the json formatter.
-  [<JsonRpcMethod("initialize", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("initialize")>]
   member x.Initialize(p: InitializeParams, ctok: CancellationToken) =
     task {
       logger.info (Log.setMessage "Initialize Request {p}" >> Log.addContextDestructured "p" p)
@@ -556,8 +543,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
       let tryGetParseResultsForFile fileName pos =
         asyncResult {
-          let! (projectOptions, fileLines, lineAtPos) =
-            commands.TryGetFileCheckerOptionsWithLinesAndLineStr(fileName, pos)
+          let! (projectOptions, fileLines, lineAtPos) = commands.TryGetFileCheckerOptionsWithLinesAndLineStr(fileName, pos)
 
           match! commands.TryGetLatestTypeCheckResultsForFile(fileName) with
           | None -> return! Error $"No typecheck results available for %A{fileName}"
@@ -566,8 +552,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
       let getFileLines = commands.TryGetFileCheckerOptionsWithLines >> Result.map snd
 
-      let getRangeText fileName range =
-        getFileLines fileName |> Result.map (fun lines -> LspHelpers.Conversions.getText lines range)
+      let getRangeText fileName range = getFileLines fileName |> Result.map (fun lines -> LspHelpers.Conversions.getText lines range)
 
       let getLineText lines range = LspHelpers.Conversions.getText lines range
       let getProjectOptsAndLines = commands.TryGetFileCheckerOptionsWithLinesAndLineStr
@@ -624,19 +609,13 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
                  | (false, _) -> None)
              Run.ifEnabled
                (fun _ -> config.InterfaceStubGeneration)
-               (GenerateInterfaceStub.fix
-                 tryGetParseResultsForFile
-                 commands.GetInterfaceStub
-                 getInterfaceStubReplacements)
+               (GenerateInterfaceStub.fix tryGetParseResultsForFile commands.GetInterfaceStub getInterfaceStubReplacements)
              Run.ifEnabled
                (fun _ -> config.RecordStubGeneration)
                (GenerateRecordStub.fix tryGetParseResultsForFile commands.GetRecordStub getRecordStubReplacements)
              Run.ifEnabled
                (fun _ -> config.AbstractClassStubGeneration)
-               (GenerateAbstractClassStub.fix
-                 tryGetParseResultsForFile
-                 commands.GetAbstractClassStub
-                 getAbstractClassStubReplacements)
+               (GenerateAbstractClassStub.fix tryGetParseResultsForFile commands.GetAbstractClassStub getAbstractClassStubReplacements)
              MissingEquals.fix getFileLines
              NegationToSubtraction.fix getFileLines
              DoubleEqualsToSingleEquals.fix getRangeText
@@ -669,8 +648,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       | _, false -> ()
       | Some p, true ->
           async {
-            let ints =
-              commands.WorkspacePeek p config.WorkspaceModePeekDeepLevel (List.ofArray config.ExcludeProjectDirectories)
+            let ints = commands.WorkspacePeek p config.WorkspaceModePeekDeepLevel (List.ofArray config.ExcludeProjectDirectories)
 
             let serialized = CommandResponse.workspacePeek JsonSerializer.writeJson ints
             client.NotifyWorkspacePeek ints |> ignore<Task>
@@ -687,15 +665,11 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
             match peeks with
             | [] -> ()
             | [ CommandResponse.WorkspacePeekFound.Directory projs ] ->
-                commands.WorkspaceLoad projs.Fsprojs false config.ScriptTFM config.GenerateBinlog
-                |> Async.Ignore
-                |> Async.Start
+                commands.WorkspaceLoad projs.Fsprojs false config.ScriptTFM config.GenerateBinlog |> Async.Ignore |> Async.Start
             | CommandResponse.WorkspacePeekFound.Solution sln :: _ ->
                 let projs = sln.Items |> List.collect LspHelpers.Workspace.foldFsproj |> List.map fst
 
-                commands.WorkspaceLoad projs false config.ScriptTFM config.GenerateBinlog
-                |> Async.Ignore
-                |> Async.Start
+                commands.WorkspaceLoad projs false config.ScriptTFM config.GenerateBinlog |> Async.Ignore |> Async.Start
             | _ ->
                 //TODO: Above case always picks solution with most projects, should be changed
                 ()
@@ -720,8 +694,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
                   DocumentFormattingProvider = Some true
                   DocumentRangeFormattingProvider = Some false
                   SignatureHelpProvider =
-                    Some
-                      { TriggerCharacters = Some [| '('; ','; ' ' |]; RetriggerCharacters = Some [| ','; ')'; ' ' |] }
+                    Some { TriggerCharacters = Some [| '('; ','; ' ' |]; RetriggerCharacters = Some [| ','; ')'; ' ' |] }
                   CompletionProvider =
                     Some
                       { ResolveProvider = Some true
@@ -746,7 +719,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
                         Full = Some(LanguageServerProtocol.LspJsonConverters.U2.First true) } } }
     }
 
-  [<JsonRpcMethod("fsharp/workspacePeek", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("fsharp/workspacePeek")>]
   member x.FSharpWorkspacePeek(p: LspHelpers.WorkspacePeekRequest) =
     task {
       let found = commands.WorkspacePeek p.Directory p.Deep (p.ExcludedDirs |> List.ofArray)
@@ -755,7 +728,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       return { PlainNotification.Content = serialized }
     }
 
-  [<JsonRpcMethod("fsharp/workspaceLoad", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("fsharp/workspaceLoad")>]
   member x.FSharpWorkspaceLoad(p: LspHelpers.WorkspaceLoadParms) =
     task {
       let fns = p.TextDocuments |> Array.map (fun fn -> fn.GetFilePath()) |> Array.toList
@@ -770,22 +743,19 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<JsonRpcMethod("initialized")>]
   member _.Initialized() = task { return () }
 
-  [<JsonRpcMethod("workspace/didChangeConfiguration", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("workspace/didChangeConfiguration")>]
   member _.WorkspaceDidChangeConfiguration(workspaceSettings: DidChangeConfigurationParams) =
     task {
       let dto = LanguageServerProtocol.Server.deserialize<FSharpConfigRequest> workspaceSettings.Settings
 
-      logger.info (
-        Log.setMessage "WorkspaceDidChangeConfiguration Request: {parms}"
-        >> Log.addContextDestructured "parms" dto
-      )
+      logger.info (Log.setMessage "WorkspaceDidChangeConfiguration Request: {parms}" >> Log.addContextDestructured "parms" dto)
 
       let c = config.AddDto dto.FSharp
       updateConfig c
       return ()
     }
 
-  [<JsonRpcMethod("textDocument/didOpen", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("textDocument/didOpen")>]
   member _.TextDocumentDidOpen(p: DidOpenTextDocumentParams, ctok) =
     task {
       let doc = p.TextDocument
@@ -796,31 +766,24 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
       commands.SetFileContent(filePath, content, Some doc.Version, config.ScriptTFM)
 
-      do!
-        commands.Parse filePath content doc.Version (Some tfmConfig)
-        |> Async.Ignore
-        |> Async.startTaskWithCancel ctok
+      do! commands.Parse filePath content doc.Version (Some tfmConfig) |> Async.Ignore |> Async.startTaskWithCancel ctok
 
       // if config.Linter then do! (commands.Lint filePath |> Async.Ignore)
       if config.UnusedOpensAnalyzer then Async.Start(commands.CheckUnusedOpens filePath, ctok)
 
-      if config.UnusedDeclarationsAnalyzer then
-        Async.Start(commands.CheckUnusedDeclarations filePath, ctok)
+      if config.UnusedDeclarationsAnalyzer then Async.Start(commands.CheckUnusedDeclarations filePath, ctok)
 
       if config.SimplifyNameAnalyzer then Async.Start(commands.CheckSimplifiedNames filePath, ctok)
     }
 
-  [<JsonRpcMethod("textDocument/didChange", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("textDocument/didChange")>]
   member _.TextDocumentDidChange(p: DidChangeTextDocumentParams, ctok: CancellationToken) =
     task {
       let doc = p.TextDocument
       let filePath = doc.GetFilePath() |> Utils.normalizePath
       let contentChange = p.ContentChanges |> Seq.tryLast
 
-      logger.info (
-        Log.setMessage "TextDocumentDidChange Request: {parms}"
-        >> Log.addContextDestructured "parms" filePath
-      )
+      logger.info (Log.setMessage "TextDocumentDidChange Request: {parms}" >> Log.addContextDestructured "parms" filePath)
 
       match contentChange, doc.Version with
       | Some contentChange, Some version ->
@@ -834,7 +797,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       parseFileDebuncer.Bounce p
     }
 
-  [<JsonRpcMethod("textDocument/didSave", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("textDocument/didSave")>]
   member _.TextDocumentDidSave(p: DidSaveTextDocumentParams) = task { return () }
 
   [<JsonRpcMethodAttribute("fsharp/loadAnalyzers", UseSingleObjectParameterDeserialization = true)>]
@@ -845,8 +808,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       try
         if config.EnableAnalyzers then
           Loggers.analyzers.info (
-            Log.setMessage "Using analyzer roots of {roots}"
-            >> Log.addContextDestructured "roots" config.AnalyzersPath
+            Log.setMessage "Using analyzer roots of {roots}" >> Log.addContextDestructured "roots" config.AnalyzersPath
           )
 
           config.AnalyzersPath
@@ -864,9 +826,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
                        else
                          System.IO.Path.Combine(workspacePath, analyzerPath)
 
-                     Loggers.analyzers.info (
-                       Log.setMessage "Loading analyzers from {dir}" >> Log.addContextDestructured "dir" dir
-                     )
+                     Loggers.analyzers.info (Log.setMessage "Loading analyzers from {dir}" >> Log.addContextDestructured "dir" dir)
 
                      let (n, m) = dir |> FSharp.Analyzers.SDK.Client.loadAnalyzers
 
@@ -882,29 +842,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       with ex -> Loggers.analyzers.error (Log.setMessage "Loading failed" >> Log.addExn ex)
     }
 
-  [<JsonRpcMethodAttribute("textDocument/documentsymbol")>]
-  member _.TextDocumentDocumentSymbol(textDocument: TextDocumentIdentifier) =
-    task {
-      logger.info (
-        Log.setMessage "TextDocumentDocumentSymbol Request: {doc}"
-        >> Log.addContextDestructured "doc" textDocument
-      )
-
-      let fn = textDocument.GetFilePath() |> Utils.normalizePath
-      let! res = commands.Declarations fn None (commands.TryGetFileVersion fn)
-
-      match res with
-      | CoreResponse.InfoRes msg
-      | CoreResponse.ErrorRes msg -> return raise (StreamJsonRpc.LocalRpcException(msg, ErrorCode = 1))
-      | CoreResponse.Res decls ->
-          return
-            decls
-            |> Array.collect (
-              fst >> fun top -> getSymbolInformations textDocument.Uri glyphToSymbolKind top (fun s -> true)
-            )
-    }
-
-  [<JsonRpcMethod("textDocument/hover", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("textDocument/hover")>]
   member x.TextDocumentHover(p: TextDocumentPositionParams, ctok: CancellationToken) : Task<Hover option> =
     logger.info (Log.setMessage "TextDocumentHover Request: {parms}" >> Log.addContextDestructured "parms" p)
 
@@ -944,14 +882,13 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
 
                    let response =
-                     { Contents = MarkedStrings [| yield! sigContent; yield commentContent; yield! footerContent |]
-                       Range = None }
+                     { Contents = MarkedStrings [| yield! sigContent; yield commentContent; yield! footerContent |]; Range = None }
 
                    async.Return(Some response)
                | _ -> async.Return None)
     |> Async.startTaskWithCancel ctok
 
-  [<JsonRpcMethod("textDocument/completion", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("textDocument/completion")>]
   member x.TextDocumentCompletion(p: CompletionParams, ctok) =
     let ensureInBounds (lines: LineStr array) (line, col) =
       let lineStr = lines.[line]
@@ -960,8 +897,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
         ()
       else
         logger.info (
-          Log.setMessage
-            "TextDocumentCompletion Not OK:\n COL: {col}\n LINE_STR: {lineStr}\n LINE_STR_LENGTH: {lineStrLength}"
+          Log.setMessage "TextDocumentCompletion Not OK:\n COL: {col}\n LINE_STR: {lineStr}\n LINE_STR_LENGTH: {lineStrLength}"
           >> Log.addContextDestructured "col" col
           >> Log.addContextDestructured "lineStr" lineStr
           >> Log.addContextDestructured "lineStrLength" lineStr.Length
@@ -1007,15 +943,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
                 |> Option.defaultWith (fun _ -> raise (AsyncLspResult.internalError "No typecheck results"))
                 |> Task.FromResult
 
-        match! commands.Completion
-                 typeCheckResults
-                 pos
-                 lineStr
-                 lines
-                 file
-                 None
-                 (config.KeywordsAutocomplete)
-                 (config.ExternalAutocomplete)
+        match! commands.Completion typeCheckResults pos lineStr lines file None (config.KeywordsAutocomplete) (config.ExternalAutocomplete)
                |> Async.startTaskWithCancel ctok with
         | CoreResponse.Res (decls, keywords) ->
             let items =
@@ -1046,7 +974,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
             return Some { IsIncomplete = true; Items = [||] }
     }
 
-  [<JsonRpcMethod("completionItem/resolve", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("completionItem/resolve")>]
   member x.CompletionItemResolve(ci: CompletionItem, ctok) =
     task {
       logger.info (Log.setMessage "CompletionItemResolve Request: {parms}" >> Log.addContextDestructured "parms" ci)
@@ -1067,8 +995,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
               match additionalEdit with
               | None -> None, ci.Label
               | Some { Namespace = ns; Position = fcsPos } ->
-                  Some [| { TextEdit.NewText = $"open {ns}"; TextEdit.Range = fcsPosToProtocolRange fcsPos } |],
-                  $"{ci.Label} (open {ns})"
+                  Some [| { TextEdit.NewText = $"open {ns}"; TextEdit.Range = fcsPosToProtocolRange fcsPos } |], $"{ci.Label} (open {ns})"
 
             let d = Documentation.Markup(markdown comment)
             { ci with Detail = Some si; Documentation = Some d; AdditionalTextEdits = edits; Label = label }
@@ -1076,7 +1003,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       return res
     }
 
-  [<JsonRpcMethod("textDocument/rename", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("textDocument/rename")>]
   member x.TextDocumentRename(p: RenameParams, ctok) =
     logger.info (Log.setMessage "TextDocumentRename Request: {parms}" >> Log.addContextDestructured "parms" p)
 
@@ -1105,8 +1032,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
                                      let range =
                                        { range with
                                            Start =
-                                             { Line = range.Start.Line
-                                               Character = range.End.Character - sym.Symbol.DisplayName.Length } }
+                                             { Line = range.Start.Line; Character = range.End.Character - sym.Symbol.DisplayName.Length } }
 
                                      { Range = range; NewText = p.NewName })
                               |> Array.distinct
@@ -1133,8 +1059,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
                                      let range =
                                        { range with
                                            Start =
-                                             { Line = range.Start.Line
-                                               Character = range.End.Character - sym.SymbolDisplayName.Length } }
+                                             { Line = range.Start.Line; Character = range.End.Character - sym.SymbolDisplayName.Length } }
 
                                      { Range = range; NewText = p.NewName })
                               |> Array.distinct
@@ -1151,12 +1076,9 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
            })
     |> Async.startTaskWithCancel ctok
 
-  [<JsonRpcMethod("textDocument/signatureHelp", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("textDocument/signatureHelp")>]
   member x.TextDocumentSignatureHelp(sigHelpParams: SignatureHelpParams, ctok: CancellationToken) =
-    logger.info (
-      Log.setMessage "TextDocumentSignatureHelp Request: {parms}"
-      >> Log.addContextDestructured "parms" sigHelpParams
-    )
+    logger.info (Log.setMessage "TextDocumentSignatureHelp Request: {parms}" >> Log.addContextDestructured "parms" sigHelpParams)
 
     sigHelpParams
     |> x.positionHandlerWithLatest
@@ -1193,7 +1115,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
            })
     |> Async.startTaskWithCancel ctok
 
-  [<JsonRpcMethod("textDocument/definition", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("textDocument/definition")>]
   member x.TextDocumentDefinition(p: TextDocumentPositionParams, ctok: CancellationToken) =
     logger.info (Log.setMessage "TextDocumentDefinition Request: {parms}" >> Log.addContextDestructured "parms" p)
 
@@ -1206,7 +1128,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
            })
     |> Async.startTaskWithCancel ctok
 
-  [<JsonRpcMethod("textDocument/typeDefinition", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("textDocument/typeDefinition")>]
   member x.TextDocumentTypeDefinition(p: TextDocumentPositionParams, ctok: CancellationToken) =
     logger.info (Log.setMessage "TextDocumentTypeDefinition Request: {parms}" >> Log.addContextDestructured "parms" p)
 
@@ -1219,7 +1141,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
            })
     |> Async.startTaskWithCancel ctok
 
-  [<JsonRpcMethod("textDocument/references", UseSingleObjectParameterDeserialization = true)>]
+  [<RpcMethod("textDocument/references")>]
   member x.TextDocumentReferences(p: ReferenceParams, ctok: CancellationToken) =
     logger.info (Log.setMessage "TextDocumentReferences Request: {parms}" >> Log.addContextDestructured "parms" p)
 
@@ -1238,3 +1160,289 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
              return Some references
            })
     |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("textDocument/documentHighlight")>]
+  member x.TextDocumentDocumentHighlight(p: TextDocumentPositionParams, ctok: CancellationToken) =
+    logger.info (Log.setMessage "TextDocumentDocumentHighlight Request: {parms}" >> Log.addContextDestructured "parms" p)
+
+    p
+    |> x.positionHandler
+         (fun p pos tyRes lineStr lines ->
+           let (symbol, uses) = commands.SymbolUse tyRes pos lineStr |> CoreResponse.toRpcError
+
+           let result = uses |> Array.map (fun s -> { DocumentHighlight.Range = fcsRangeToLsp s.RangeAlternate; Kind = None }) |> Some
+
+           async.Return result)
+    |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("textDocument/implementation")>]
+  member x.TextDocumentImplementation(p: TextDocumentPositionParams, ctok: CancellationToken) =
+    logger.info (Log.setMessage "TextDocumentImplementation Request: {parms}" >> Log.addContextDestructured "parms" p)
+
+    p
+    |> x.positionHandler
+         (fun p pos tyRes lineStr lines ->
+           async {
+             let! res = commands.SymbolImplementationProject tyRes pos lineStr |> AsyncResult.ofCoreResponse
+
+             match res with
+             | LocationResponse.Use (symbol, uses) ->
+                 return uses |> Array.map (fun n -> fcsRangeToLspLocation n.RangeAlternate) |> GotoResult.Multiple |> Some
+             | LocationResponse.UseRange uses -> return uses |> Array.map symbolUseRangeToLspLocation |> GotoResult.Multiple |> Some
+           })
+    |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("textDocument/documentSymbol")>]
+  member x.TextDocumentDocumentSymbol(p: TextDocumentPositionParams, ctok: CancellationToken) =
+    task {
+      logger.info (Log.setMessage "TextDocumentDocumentSymbol Request: {parms}" >> Log.addContextDestructured "parms" p)
+      let fn = p.TextDocument.GetFilePath() |> Utils.normalizePath
+
+      let! decls =
+        commands.Declarations fn None (commands.TryGetFileVersion fn)
+        |> AsyncResult.ofCoreResponse
+        |> Async.startTaskWithCancel ctok
+
+      let symbols =
+        decls
+        |> Array.collect (fst >> fun top -> getSymbolInformations p.TextDocument.Uri glyphToSymbolKind top (fun s -> true))
+
+      return Some symbols
+    }
+
+  [<RpcMethod("workspace/symbol")>]
+  member x.WorkspaceSymbol(symbolRequest: WorkspaceSymbolParams, ctok: CancellationToken) =
+    task {
+      logger.info (Log.setMessage "WorkspaceSymbol Request: {parms}" >> Log.addContextDestructured "parms" symbolRequest)
+
+      let! decls = commands.DeclarationsInProjects() |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+
+      let symbols =
+        decls
+        |> Array.collect
+             (fun (n, p) ->
+               let uri = Path.LocalPathToUri p
+               getSymbolInformations uri glyphToSymbolKind n (applyQuery symbolRequest.Query))
+
+      return Some symbols
+    }
+
+  [<RpcMethod("textDocument/formatting")>]
+  member x.TextDocumentFormatting(p: DocumentFormattingParams, ctok: CancellationToken) =
+    task {
+      logger.info (Log.setMessage "TextDocumentFormatting Request: {parms}" >> Log.addContextDestructured "parms" p)
+      let doc = p.TextDocument
+      let fileName = doc.GetFilePath() |> Utils.normalizePath
+      let! res = commands.FormatDocument fileName |> Async.startTaskWithCancel ctok
+
+      match res with
+      | Some (lines, formatted) ->
+          let range =
+            let zero = { Line = 0; Character = 0 }
+            let endLine = Array.length lines - 1
+            let endCharacter = Array.tryLast lines |> Option.map (fun line -> line.Length) |> Option.defaultValue 0
+            { Start = zero; End = { Line = endLine; Character = endCharacter } }
+
+          return Some([| { Range = range; NewText = formatted } |])
+      | None -> return None
+    }
+
+  [<RpcMethod("textDocument/codeAction")>]
+  member x.TextDocumentCodeAction(codeActionParams: CodeActionParams, ctok: CancellationToken) =
+    task {
+      logger.info (Log.setMessage "TextDocumentCodeAction Request: {parms}" >> Log.addContextDestructured "parms" codeActionParams)
+
+      let fn = codeActionParams.TextDocument.GetFilePath() |> Utils.normalizePath
+
+      match commands.TryGetFileCheckerOptionsWithLines fn with
+      | Error s -> return None // no options, no checks
+      | Ok _ ->
+
+          let! actions =
+            Async.Parallel(codeFixes codeActionParams) |> Async.map (List.concat >> Array.ofList) |> Async.startTaskWithCancel ctok
+
+          return actions |> TextDocumentCodeActionResult.CodeActions |> Some
+    }
+
+  [<RpcMethod("textDocument/codeLens")>]
+  member __.TextDocumentCodeLens(p: CodeLensParams, ctok: CancellationToken) =
+    task {
+      logger.info (Log.setMessage "TextDocumentCodeLens Request: {parms}" >> Log.addContextDestructured "parms" p)
+
+      let fn = p.TextDocument.GetFilePath() |> Utils.normalizePath
+
+      let! decls =
+        commands.Declarations fn None (commands.TryGetFileVersion fn)
+        |> AsyncResult.ofCoreResponse
+        |> Async.startTaskWithCancel ctok
+
+      if config.LineLens.Enabled <> "replaceCodeLens" then
+        let sigs = decls |> Array.collect (fst >> getCodeLensInformation p.TextDocument.Uri "signature")
+
+        let references =
+          if config.EnableReferenceCodeLens then
+            decls |> Array.collect (fst >> getCodeLensInformation p.TextDocument.Uri "reference")
+          else
+            [||]
+
+        return Some [| yield! references; yield! sigs |]
+      else
+        return None
+    }
+
+  [<RpcMethod("codeLens/resolve")>]
+  member x.CodeLensResolve(p: CodeLens, ctok: CancellationToken) =
+    logger.info (Log.setMessage "CodeLensResolve Request: {parms}" >> Log.addContextDestructured "parms" p)
+
+    let handler f (arg: CodeLens) =
+      async {
+        let pos = FcsPos.mkPos (arg.Range.Start.Line + 1) (arg.Range.Start.Character + 2)
+        let data = arg.Data.Value.ToObject<string []>()
+        let file = Path.FileUriToLocalPath data.[0] |> Utils.normalizePath
+
+        return!
+          match commands.TryGetFileCheckerOptionsWithLinesAndLineStr(file, pos) with
+          | ResultOrString.Error s ->
+              logger.error (
+                Log.setMessage "CodeLensResolve - Getting file checker options failed for {file}"
+                >> Log.addContextDestructured "file" file
+                >> Log.addContextDestructured "error" s
+              )
+
+              let cmd = { Title = "No options"; Command = None; Arguments = None }
+              { p with Command = Some cmd } |> async.Return
+          | ResultOrString.Ok (options, _, lineStr) ->
+              try
+                async {
+                  let! tyResOpt = commands.TryGetLatestTypeCheckResultsForFile(file)
+
+                  return!
+                    match tyResOpt with
+                    | None ->
+                        logger.warn (
+                          Log.setMessage "CodeLensResolve - Cached typecheck results not yet available for {file}"
+                          >> Log.addContextDestructured "file" file
+                        )
+
+                        let cmd = { Title = "No typecheck results"; Command = None; Arguments = None }
+                        { p with Command = Some cmd } |> async.Return
+                    | Some tyRes ->
+                        async {
+                          let! r = Async.Catch(f arg pos tyRes lineStr data.[1] file)
+
+                          match r with
+                          | Choice1Of2 r -> return r
+                          | Choice2Of2 e ->
+                              logger.error (
+                                Log.setMessage "CodeLensResolve - Child operation failed for {file}"
+                                >> Log.addContextDestructured "file" file
+                                >> Log.addExn e
+                              )
+
+                              let cmd = { Title = ""; Command = None; Arguments = None }
+                              return { p with Command = Some cmd }
+                        }
+                }
+              with e ->
+                logger.error (
+                  Log.setMessage "CodeLensResolve - Operation failed on {file}" >> Log.addContextDestructured "file" file >> Log.addExn e
+                )
+
+                let cmd = { Title = ""; Command = None; Arguments = None }
+                { p with Command = Some cmd } |> async.Return
+      }
+
+
+    handler
+      (fun p pos tyRes lineStr typ file ->
+        async {
+          if typ = "signature" then
+            match commands.SignatureData tyRes pos lineStr with
+            | CoreResponse.InfoRes msg
+            | CoreResponse.ErrorRes msg ->
+                logger.error (
+                  Log.setMessage "CodeLensResolve - error on file {file}"
+                  >> Log.addContextDestructured "file" file
+                  >> Log.addContextDestructured "error" msg
+                )
+
+                let cmd = { Title = ""; Command = None; Arguments = None }
+                return { p with Command = Some cmd }
+            | CoreResponse.Res (typ, parms, _) ->
+                let formatted = SigantureData.formatSignature typ parms
+                let cmd = { Title = formatted; Command = None; Arguments = None }
+                return { p with Command = Some cmd }
+          else
+            let! res = commands.SymbolUseProject tyRes pos lineStr
+
+            let res =
+              match res with
+              | CoreResponse.InfoRes msg
+              | CoreResponse.ErrorRes msg ->
+                  logger.error (
+                    Log.setMessage "CodeLensResolve - error getting symbol use for {file}"
+                    >> Log.addContextDestructured "file" file
+                    >> Log.addContextDestructured "error" msg
+                  )
+
+                  let cmd = { Title = ""; Command = None; Arguments = None }
+                  { p with Command = Some cmd }
+              | CoreResponse.Res (LocationResponse.Use (sym, uses)) ->
+                  let formatted = if uses.Length = 1 then "1 Reference" else sprintf "%d References" uses.Length
+                  let locs = uses |> Array.map (fun n -> fcsRangeToLspLocation n.RangeAlternate)
+
+                  let args = [| JToken.FromObject(Path.LocalPathToUri file); JToken.FromObject(fcsPosToLsp pos); JToken.FromObject locs |]
+
+                  let cmd = { Title = formatted; Command = Some "fsharp.showReferences"; Arguments = Some args }
+                  { p with Command = Some cmd }
+              | CoreResponse.Res (LocationResponse.UseRange (uses)) ->
+                  let formatted =
+                    if uses.Length - 1 = 1 then "1 Reference"
+                    elif uses.Length = 0 then "0 References"
+                    else sprintf "%d References" (uses.Length - 1)
+
+                  let locs = uses |> Array.map symbolUseRangeToLspLocation
+
+                  let args = [| JToken.FromObject(Path.LocalPathToUri file); JToken.FromObject(fcsPosToLsp pos); JToken.FromObject locs |]
+
+                  let cmd = { Title = formatted; Command = Some "fsharp.showReferences"; Arguments = Some args }
+                  { p with Command = Some cmd }
+
+            return res
+        })
+      p
+    |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("workspace/didChangeWatchedFiles")>]
+  member x.WorkspaceDidChangeWatchedFiles(p: DidChangeWatchedFilesParams, ctok: CancellationToken) =
+    task {
+      logger.info (Log.setMessage "WorkspaceDidChangeWatchedFiles Request: {parms}" >> Log.addContextDestructured "parms" p)
+
+      p.Changes
+      |> Array.iter
+           (fun c ->
+             if c.Type = FileChangeType.Deleted then
+               let uri = c.Uri
+               diagnosticCollections.AddOrUpdate((uri, "F# Compiler"), [||], (fun _ _ -> [||])) |> ignore
+               diagnosticCollections.AddOrUpdate((uri, "F# Unused opens"), [||], (fun _ _ -> [||])) |> ignore
+               diagnosticCollections.AddOrUpdate((uri, "F# Unused declarations"), [||], (fun _ _ -> [||])) |> ignore
+               diagnosticCollections.AddOrUpdate((uri, "F# simplify names"), [||], (fun _ _ -> [||])) |> ignore
+               diagnosticCollections.AddOrUpdate((uri, "F# Linter"), [||], (fun _ _ -> [||])) |> ignore
+               sendDiagnostics uri
+
+             ())
+
+      return ()
+    }
+
+  [<RpcMethod("workspace/didChangeConfiguration")>]
+  member __.WorkspaceDidChangeConfiguration(p: DidChangeConfigurationParams, ctok: CancellationToken) =
+    task {
+      let dto = p.Settings |> LanguageServerProtocol.Server.deserialize<FSharpConfigRequest>
+      logger.info (Log.setMessage "WorkspaceDidChangeConfiguration Request: {parms}" >> Log.addContextDestructured "parms" dto)
+
+      let c = config.AddDto dto.FSharp
+      updateConfig c
+      logger.info (Log.setMessage "Workspace configuration changed" >> Log.addContextDestructured "config" c)
+      return ()
+    }
