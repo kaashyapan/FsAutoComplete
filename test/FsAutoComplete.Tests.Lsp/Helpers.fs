@@ -3,11 +3,14 @@ module Helpers
 open System
 open Expecto
 open System.IO
-open FsAutoComplete.Lsp
+open FsAutoComplete.LspServer
 open LanguageServerProtocol
 open LanguageServerProtocol.Types
 open FsAutoComplete
 open FsAutoComplete.LspHelpers
+open StreamJsonRpc
+open System.Threading.Tasks
+open FSharp.UMX
 
 type Async =
   /// Creates an asynchronous workflow that non-deterministically returns the
@@ -59,15 +62,43 @@ type Async =
 
 let logger = Expecto.Logging.Log.create "LSPTests"
 
-let createServer (toolsPath) workspaceLoaderFactory =
+type ClientEvents =
+| WorkspacePeek of interestingItems : list<Ionide.ProjInfo.ProjectSystem.WorkspacePeek.Interesting>
+| Diagnostics of uri: DocumentUri * diagnostics: Diagnostic []
+| FileParsed of filePath: string<LocalPath>
+| NotifyWorkspace of project: Ionide.ProjInfo.ProjectSystem.ProjectResponse
 
-  let event = Event<string * obj> ()
-  let client = FSharpLspClient ((fun name o -> event.Trigger (name,o); AsyncLspResult.success ()), { new LanguageServerProtocol.Server.ClientRequestSender with member __.Send _ _ = AsyncLspResult.notImplemented})
+let createServer (toolsPath) workspaceLoaderFactory =
+  let mockInput = new MemoryStream()
+  let mockOutput = new MemoryStream()
+  let event = Event<ClientEvents> ()
   let originalFs = FSharp.Compiler.SourceCodeServices.FileSystemAutoOpens.FileSystem
   let state = State.Initial toolsPath workspaceLoaderFactory
   let fs = FsAutoComplete.FileSystem(originalFs, state.Files.TryFind)
   FSharp.Compiler.SourceCodeServices.FileSystemAutoOpens.FileSystem <- fs
-  let server = new FSharpLspServer(false, state, client)
+  let server = new FSharpLspServer(mockInput, mockOutput, false, state)
+  let client =
+    { new FSharpLspClient(null) with
+        override x.NotifyWorkspacePeek(interestingItems: list<Ionide.ProjInfo.ProjectSystem.WorkspacePeek.Interesting>) =
+          event.Trigger (ClientEvents.WorkspacePeek interestingItems)
+          Task.CompletedTask
+
+        override x.TextDocumentPublishDiagnostics(uri: DocumentUri, diagnostics: Diagnostic []) =
+          event.Trigger (ClientEvents.Diagnostics(uri, diagnostics))
+          Task.CompletedTask
+
+        override x.NotifyFileParsed(localPath) =
+          event.Trigger (ClientEvents.FileParsed localPath)
+          Task.CompletedTask
+
+        override x.NotifyWorkspace(project) =
+          event.Trigger (ClientEvents.NotifyWorkspace project)
+          Task.CompletedTask
+
+        override x.NotifyCancelledRequest(message: string) =
+          Task.CompletedTask
+      }
+  server.Client <- client
   server, event
 
 let defaultConfigDto : FSharpConfigDto =
@@ -220,8 +251,6 @@ let dotnetCleanup baseDir =
   |> List.filter Directory.Exists
   |> List.iter (fun path -> Directory.Delete(path, true))
 
-
-
 let runProcess (log: string -> unit) (workingDir: string) (exePath: string) (args: string) =
   let psi = System.Diagnostics.ProcessStartInfo()
   psi.FileName <- exePath
@@ -251,7 +280,6 @@ let runProcess (log: string -> unit) (workingDir: string) (exePath: string) (arg
 let expectExitCodeZero (exitCode, _) =
   Expect.equal exitCode 0 (sprintf "expected exit code zero but was %i" exitCode)
 
-
 let serverInitialize path (config: FSharpConfigDto) toolsPath workspaceLoaderFactory =
   dotnetCleanup path
   let files = Directory.GetFiles(path)
@@ -273,12 +301,8 @@ let serverInitialize path (config: FSharpConfigDto) toolsPath workspaceLoaderFac
       Capabilities = Some clientCaps
       trace = None}
 
-  let result = server.Initialize p |> Async.RunSynchronously
-  match result with
-  | Result.Ok res ->
-    (server, event)
-  | Result.Error e ->
-    failwith "Initialization failed"
+  let _result = server.Initialize(p, CancellationToken.None).GetAwaiter().GetResult()
+  server, event
 
 let loadDocument path : TextDocumentItem =
   { Uri = Path.FilePathToUri path
@@ -291,41 +315,28 @@ let parseProject projectFilePath (server: FSharpLspServer) = async {
     { Project = { Uri = Path.FilePathToUri projectFilePath } }
 
   let projectName = Path.GetFileNameWithoutExtension projectFilePath
-  let! result = server.FSharpProject projectParams
+  let! ctok = Async.CancellationToken
+  let! result = Async.AwaitTask (server.FSharpProject(projectParams, ctok))
   do! Async.Sleep (TimeSpan.FromSeconds 3.)
   logger.debug (eventX "{project} parse result: {result}" >> setField "result" (sprintf "%A" result) >> setField "project" projectName)
 }
 
-let waitForWorkspaceFinishedParsing (event : Event<string * obj>) =
+let waitForWorkspaceFinishedParsing (event : Event<ClientEvents>) =
   Thread.Sleep (TimeSpan.FromSeconds 3.)
 
-//This is currently used for single tests, hence the naive implementation is working just fine.
-//Revisit if more tests will use this scenario.
-let mutable projectOptsList : FSharp.Compiler.SourceCodeServices.FSharpProjectOptions list = []
-let waitForScriptFilePropjectOptions (server: FSharpLspServer) =
-  server.ScriptFileProjectOptions
-  |> Event.add (fun n -> projectOptsList <- n::projectOptsList)
-
-let private typedEvents typ =
-  Event.filter (fun (typ', _o) -> typ' = typ)
-
-let private payloadAs<'t> =
-  Event.map (fun (_typ, o) -> unbox<'t> o)
-
 let private getDiagnosticsEvents =
-  typedEvents "textDocument/publishDiagnostics"
-  >> payloadAs<LanguageServerProtocol.Types.PublishDiagnosticsParams>
+  Event.choose (function ClientEvents.Diagnostics (uri, diags) -> Some (uri, diags) | _ -> None )
 
 /// note that the files here are intended to be the filename only., not the full URI.
 let private matchFiles (files: string Set) =
-  Event.choose (fun (p: LanguageServerProtocol.Types.PublishDiagnosticsParams) ->
-    let filename = p.Uri.Split([| '/'; '\\' |], StringSplitOptions.RemoveEmptyEntries) |> Array.last
+  Event.choose (fun (uri: DocumentUri, diags) ->
+    let filename = uri.Split([| '/'; '\\' |], StringSplitOptions.RemoveEmptyEntries) |> Array.last
     if Set.contains filename files
-    then Some (filename, p)
+    then Some (filename, diags)
     else None
   )
 
-let private fileDiagnostics file (events: Event<string*obj>) =
+let private fileDiagnostics file (events: Event<ClientEvents>) =
   logger.info (eventX "waiting for events on file {file}" >> setField "file" file)
   events.Publish
   |> getDiagnosticsEvents
@@ -334,30 +345,29 @@ let private fileDiagnostics file (events: Event<string*obj>) =
 let analyzerEvents file events =
   fileDiagnostics file events
   |> Event.map snd
-  |> Event.filter (fun payload -> payload.Diagnostics |> Array.exists (fun d -> d.Source.StartsWith "F# Analyzers"))
+  |> Event.filter (fun diags -> diags |> Array.exists (fun d -> d.Source.StartsWith "F# Analyzers"))
 
-let waitForParseResultsForFile file (events: Event<string*obj>) =
+let waitForParseResultsForFile file (events: Event<ClientEvents>) =
   let matchingFileEvents = fileDiagnostics file events
   async {
-    let! (filename, args) = Async.AwaitEvent matchingFileEvents
-    match args.Diagnostics with
+    let! (filename, diags) = Async.AwaitEvent matchingFileEvents
+    match diags with
     | [||] -> return Ok ()
     | errors -> return Core.Result.Error errors
   }
   |> Async.RunSynchronously
 
-let inline waitForParsedScript (m: System.Threading.ManualResetEvent) (event: Event<string * obj>) =
+let waitForParsedScript (m: System.Threading.ManualResetEvent) (event: Event<ClientEvents>) =
 
-  let bag = new System.Collections.Concurrent.ConcurrentBag<LanguageServerProtocol.Types.PublishDiagnosticsParams>()
+  let bag = new System.Collections.Concurrent.ConcurrentBag<_>()
 
   event.Publish
-  |> Event.filter (fun (typ, o) -> typ = "textDocument/publishDiagnostics")
-  |> Event.map (fun (typ, o) -> unbox<LanguageServerProtocol.Types.PublishDiagnosticsParams> o)
-  |> Event.filter (fun n ->
-    let filename = n.Uri.Replace('\\', '/').Split('/') |> Array.last
+  |> getDiagnosticsEvents
+  |> Event.filter (fun (uri, diags) ->
+    let filename = uri.Replace('\\', '/').Split('/') |> Array.last
     filename = "Script.fs")
-  |> Event.add (fun n ->
-    bag.Add(n)
+  |> Event.add (fun (uri, diags) ->
+    bag.Add((uri, diags))
     m.Set() |> ignore
   )
 

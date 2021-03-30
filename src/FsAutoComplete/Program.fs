@@ -66,8 +66,8 @@ let entry args =
       use compilerEventListener = new Debug.FSharpCompilerEventLogger.Listener()
       //let result = FsAutoComplete.Lsp.start commands
       let state = State.Initial toolsPath workspaceLoaderFactory
-      let server = ExternalLsp.FSharpLspServer(Console.OpenStandardOutput(), Console.OpenStandardInput(), backgroundServiceEnabled, state)
-      server.WaitForClose().GetAwaiter().GetResult()
+      let server = LspServer.FSharpLspServer(Console.OpenStandardOutput(), Console.OpenStandardInput(), backgroundServiceEnabled, state)
+      server.WaitForClose.GetAwaiter().GetResult()
       Serilog.Log.CloseAndFlush()
       0
     with

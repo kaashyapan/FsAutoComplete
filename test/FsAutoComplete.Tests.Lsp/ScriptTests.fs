@@ -7,6 +7,7 @@ open LanguageServerProtocol.Types
 open FsAutoComplete
 open FsAutoComplete.LspHelpers
 open Helpers
+open System.Threading
 
 let scriptPreviewTests toolsPath workspaceLoaderFactory =
   let serverStart = lazy (
@@ -20,7 +21,7 @@ let scriptPreviewTests toolsPath workspaceLoaderFactory =
 
   testList "script features" [
     testCase "can typecheck scripts when preview features are used" (serverTest (fun (server, events, scriptPath) ->
-      do server.TextDocumentDidOpen { TextDocument = loadDocument scriptPath } |> Async.RunSynchronously
+      do server.TextDocumentDidOpen({ TextDocument = loadDocument scriptPath }, CancellationToken.None).Wait()
       match waitForParseResultsForFile "Script.fsx" events with
       | Ok () ->
         () // all good, no parsing/checking errors
@@ -41,7 +42,7 @@ let scriptEvictionTests toolsPath workspaceLoaderFactory =
 
   testList "script eviction tests" [
     ptestCase "can update script typechecking when arguments change" (serverTest (fun (server, events, scriptPath) ->
-      let openScript () = do server.TextDocumentDidOpen { TextDocument = loadDocument scriptPath } |> Async.RunSynchronously
+      let openScript () = do server.TextDocumentDidOpen({ TextDocument = loadDocument scriptPath }, CancellationToken.None).Wait()
 
       openScript ()
       match waitForParseResultsForFile "Script.fsx" events with
@@ -54,7 +55,7 @@ let scriptEvictionTests toolsPath workspaceLoaderFactory =
         let config : FSharpConfigRequest =
           { FSharp = { defaultConfigDto with FSIExtraParameters = Some [| "--langversion:preview" |] } }
         { Settings = Server.serialize config }
-      do server.WorkspaceDidChangeConfiguration configChange |> Async.RunSynchronously
+      do server.WorkspaceDidChangeConfiguration(configChange, CancellationToken.None).Wait()
       do waitForParseResultsForFile "Script.fsx" events |> ignore // errors returned by background checking, not sure why it worked before...
 
       openScript ()
@@ -85,7 +86,7 @@ let dependencyManagerTests toolsPath workspaceLoaderFactory =
     testCase "can typecheck script that depends on #r dummy dependency manager" (serverTest (fun (server, events, workingDir) ->
       let scriptName = "DepManagerPresentScript.fsx"
       let scriptPath = Path.Combine(workingDir, scriptName)
-      do server.TextDocumentDidOpen { TextDocument = loadDocument scriptPath } |> Async.RunSynchronously
+      do server.TextDocumentDidOpen({ TextDocument = loadDocument scriptPath }, CancellationToken.None).Wait()
       match waitForParseResultsForFile scriptName events with
       | Ok _ -> ()
       | Core.Result.Error e ->
@@ -95,7 +96,7 @@ let dependencyManagerTests toolsPath workspaceLoaderFactory =
     testCase "fails to typecheck script when dependency manager is missing" (serverTest (fun (server, events, workingDir) ->
       let scriptName = "DepManagerAbsentScript.fsx"
       let scriptPath = Path.Combine(workingDir, scriptName)
-      do server.TextDocumentDidOpen { TextDocument = loadDocument scriptPath } |> Async.RunSynchronously
+      do server.TextDocumentDidOpen({ TextDocument = loadDocument scriptPath }, CancellationToken.None).Wait()
 
       match waitForParseResultsForFile scriptName events with
       | Ok _ ->
@@ -104,34 +105,6 @@ let dependencyManagerTests toolsPath workspaceLoaderFactory =
         match e with
         | [| { Code = Some "3400" }; _ |] -> () // this is the error code that signals a missing dependency manager, so this is a 'success'
         | e -> failwithf "Unexpected error during typechecking: %A" e
-    ))
-  ]
-
-let scriptProjectOptionsCacheTests toolsPath workspaceLoaderFactory =
-  let serverStart () =
-    let workingDir = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "ScriptProjectOptsCache")
-    let previewEnabledConfig =
-      { defaultConfigDto with
-          FSIExtraParameters = Some [| "--langversion:preview" |] }
-    let (server, events) = serverInitialize workingDir previewEnabledConfig toolsPath workspaceLoaderFactory
-    let scriptPath = Path.Combine(workingDir, "Script.fsx")
-    do waitForWorkspaceFinishedParsing events
-    server, events, workingDir, scriptPath
-
-  let serverTest f = fun () -> f (serverStart ())
-
-  testList "ScriptProjectOptionsCache" [
-    testCase "reopening the script file should return same project options for file" (serverTest (fun (server, events, workingDir, testFilePath) ->
-      waitForScriptFilePropjectOptions server
-      do server.TextDocumentDidOpen { TextDocument = loadDocument testFilePath } |> Async.RunSynchronously
-      do System.Threading.Thread.Sleep 3000
-      do server.TextDocumentDidOpen { TextDocument = loadDocument testFilePath } |> Async.RunSynchronously
-      do System.Threading.Thread.Sleep 3000
-
-      let opts1 = projectOptsList.[0]
-      let opts2 = projectOptsList.[1]
-
-      Expect.equal opts1 opts2 "Project opts should be eqaul"
     ))
   ]
 
@@ -144,7 +117,7 @@ let scriptGotoTests toolsPath workspaceLoaderFactory =
 
     let scriptPath = Path.Combine(path, "Script.fsx")
     let tdop : DidOpenTextDocumentParams = { TextDocument = loadDocument scriptPath }
-    do server.TextDocumentDidOpen tdop |> Async.RunSynchronously
+    do server.TextDocumentDidOpen(tdop, CancellationToken.None).Wait()
 
     (server, scriptPath)
   )
@@ -158,12 +131,11 @@ let scriptGotoTests toolsPath workspaceLoaderFactory =
         TextDocument = { Uri = Path.FilePathToUri scriptPath }
         Position = { Line = 0; Character = 10 }
       }
-      let res = server.TextDocumentDefinition p |> Async.RunSynchronously
+      let res = server.TextDocumentDefinition(p, CancellationToken.None).GetAwaiter().GetResult()
       match res with
-      | Error e -> failtestf "Request failed: %A" e
-      | Ok None -> failtest "Request none"
-      | Ok (Some (GotoResult.Multiple _)) -> failtest "Should only get one location"
-      | Ok (Some (GotoResult.Single r)) ->
+      | None -> failtest "Request none"
+      | Some (GotoResult.Multiple _) -> failtest "Should only get one location"
+      | Some (GotoResult.Single r) ->
         Expect.stringEnds r.Uri "/simple.fsx" "should navigate to the mentioned script file"
         ()
     ))

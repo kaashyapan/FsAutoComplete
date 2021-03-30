@@ -1,4 +1,4 @@
-module FsAutoComplete.ExternalLsp
+module FsAutoComplete.LspServer
 
 open FsAutoComplete
 open StreamJsonRpc
@@ -63,19 +63,23 @@ module Mapping =
 type FSharpLspClient(rpc: JsonRpc) =
   let logger = LogProvider.getLoggerByType typeof<FSharpLspClient>
 
-  member x.NotifyWorkspacePeek(interestingItems: list<Ionide.ProjInfo.ProjectSystem.WorkspacePeek.Interesting>) =
+  abstract NotifyWorkspacePeek : interestingItems: list<Ionide.ProjInfo.ProjectSystem.WorkspacePeek.Interesting> -> Task
+  default x.NotifyWorkspacePeek(interestingItems: list<Ionide.ProjInfo.ProjectSystem.WorkspacePeek.Interesting>) =
     rpc.NotifyWithParameterObjectAsync("fsharp/workspacePeek", Mapping.mapWorkspacePeek interestingItems)
 
-  member x.TextDocumentPublishDiagnostics(uri: DocumentUri, diagnostics: Diagnostic []) =
+  abstract TextDocumentPublishDiagnostics : uri: DocumentUri * diagnostics: Diagnostic [] -> Task
+  default x.TextDocumentPublishDiagnostics(uri: DocumentUri, diagnostics: Diagnostic []) =
     rpc.NotifyWithParameterObjectAsync(
       "textDocument/publishDiagnostics",
       ({ Diagnostics = diagnostics; Uri = uri }: PublishDiagnosticsParams)
     )
 
-  member x.NotifyFileParsed(localPath: string<LocalPath>) =
+  abstract NotifyFileParsed: localPath : string<LocalPath> -> Task
+  default x.NotifyFileParsed(localPath: string<LocalPath>) =
     rpc.NotifyWithParameterObjectAsync("fsharp/fileParsed", { Content = UMX.untag localPath })
 
-  member x.NotifyWorkspace(project: ProjectResponse) =
+  abstract NotifyWorkspace: project: ProjectResponse -> Task
+  default x.NotifyWorkspace(project: ProjectResponse) =
     let payload =
       match project with
       | ProjectResponse.Project (x, _) -> CommandResponse.project JsonSerializer.writeJson x
@@ -86,7 +90,8 @@ type FSharpLspClient(rpc: JsonRpc) =
 
     rpc.NotifyWithParameterObjectAsync("fsharp/notifyWorkspace", { Content = payload })
 
-  member x.NotifyCancelledRequest(message: string) = rpc.NotifyWithParameterObjectAsync("fsharp/notifyCancel", { Content = message })
+  abstract NotifyCancelledRequest: message: string -> Task
+  default x.NotifyCancelledRequest(message: string) = rpc.NotifyWithParameterObjectAsync("fsharp/notifyCancel", { Content = message })
 
 type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: bool, state: State) as this =
 
@@ -108,7 +113,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   // LSP uses a header-delimited message stream, so we use the handler that understands that format
   let handler = new StreamJsonRpc.HeaderDelimitedMessageHandler(sender, reader, formatter)
   let rpc = new JsonRpc(handler, this)
-  let client = FSharpLspClient(rpc)
+  let mutable client = FSharpLspClient(rpc)
 
   let backgroundService : BackgroundServices.BackgroundService =
     if backgroundServiceEnabled then
@@ -431,7 +436,11 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
     commandDisposables.Add <| commands.Notify.Subscribe handleCommandEvents
 
-  member x.WaitForClose() = rpc.Completion
+  /// provides access to the underlying RPC client representing the hosting application for this LSP server instance
+  member val Client = client with get, set
+
+  /// returns a hot task that resolves when the stream has terminated
+  member x.WaitForClose = rpc.Completion
 
   ///Helper function for handling Position requests using **recent** type check results
   member x.positionHandler<'a, 'b when 'b :> ITextDocumentPositionParams>
@@ -1247,7 +1256,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     |> Async.startTaskWithCancel ctok
 
   [<RpcMethod("textDocument/documentSymbol")>]
-  member x.TextDocumentDocumentSymbol(p: TextDocumentPositionParams, ctok: CancellationToken) =
+  member x.TextDocumentDocumentSymbol(p: DocumentSymbolParams, ctok: CancellationToken) =
     task {
       logger.info (Log.setMessage "TextDocumentDocumentSymbol Request: {parms}" >> Log.addContextDestructured "parms" p)
       let fn = p.TextDocument.GetFilePath() |> Utils.normalizePath
