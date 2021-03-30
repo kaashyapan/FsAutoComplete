@@ -49,6 +49,10 @@ module CoreResponse =
 module AsyncResult =
   let ofCoreResponse (ar: Async<CoreResponse<'a>>) = ar |> Async.map CoreResponse.toRpcError
 
+module Result =
+  let ofCoreResponse (r: Result<CoreResponse<'a>, _>) =
+    r |> Result.fold CoreResponse.toRpcError (fun e -> raise (AsyncLspResult.internalError e))
+
 module Mapping =
   let mapWorkspacePeek interestingItems =
     let payload : CommandResponse.WorkspacePeekResponse = { Found = interestingItems |> List.map CommandResponse.mapInteresting }
@@ -512,6 +516,56 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
         return raise (AsyncLspResult.internalError e.Message)
     }
 
+  ///Helper function for handling file requests using **recent** type check results
+  member x.fileHandler<'a> (f: string<LocalPath> -> ParseAndCheckResults -> string [] -> Async<'a>) (file: string<LocalPath>) : Async<'a> =
+    async {
+      return!
+        match commands.TryGetFileCheckerOptionsWithLines(file) with
+        | ResultOrString.Error s ->
+            logger.error (
+              Log.setMessage "FileHandler - Getting file checker options for {file} failed"
+              >> Log.addContextDestructured "error" s
+              >> Log.addContextDestructured "file" file
+            )
+
+            raise (AsyncLspResult.internalError s)
+        | ResultOrString.Ok (options, lines) ->
+            try
+              let tyResOpt = commands.TryGetRecentTypeCheckResultsForFile(file, options)
+
+              match tyResOpt with
+              | None ->
+                  logger.info (
+                    Log.setMessage "FileHandler - Cached typecheck results not yet available for {file}"
+                    >> Log.addContextDestructured "file" file
+                  )
+
+                  raise (AsyncLspResult.internalError "Cached typecheck results not yet available")
+              | Some tyRes ->
+                  async {
+                    let! r = Async.Catch(f file tyRes lines)
+
+                    match r with
+                    | Choice1Of2 r -> return r
+                    | Choice2Of2 e ->
+                        logger.error (
+                          Log.setMessage "FileHandler - Failed during child operation on file {file}"
+                          >> Log.addContextDestructured "file" file
+                          >> Log.addExn e
+                        )
+
+                        return raise (AsyncLspResult.internalError e.Message)
+                  }
+            with e ->
+              logger.error (
+                Log.setMessage "FileHandler - Operation failed for file {file}"
+                >> Log.addContextDestructured "file" file
+                >> Log.addExn e
+              )
+
+              raise (AsyncLspResult.internalError e.Message)
+    }
+
 
   // the names have to match exactly, which can suck if they have / characters
   // also, you have to match the parameters _exactly_, which means it's safer usually to have
@@ -729,15 +783,15 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     }
 
   [<RpcMethod("fsharp/workspaceLoad")>]
-  member x.FSharpWorkspaceLoad(p: LspHelpers.WorkspaceLoadParms) =
+  member x.FSharpWorkspaceLoad(p: LspHelpers.WorkspaceLoadParms, ctok) =
     task {
       let fns = p.TextDocuments |> Array.map (fun fn -> fn.GetFilePath()) |> Array.toList
-      let! _ = commands.WorkspaceLoad fns config.DisableInMemoryProjectReferences config.ScriptTFM config.GenerateBinlog
 
-      let status : CommandResponse.ResponseMsg<_> =
-        { Kind = "workspaceLoad"; Data = { CommandResponse.WorkspaceLoadResponse.Status = "started" } }
+      let! fin =
+        commands.WorkspaceLoad fns config.DisableInMemoryProjectReferences config.ScriptTFM config.GenerateBinlog
+        |> Async.startTaskWithCancel ctok
 
-      return { PlainNotification.Content = JsonSerializer.writeJson status }
+      return { Content = CommandResponse.workspaceLoad FsAutoComplete.JsonSerializer.writeJson fin }
     }
 
   [<JsonRpcMethod("initialized")>]
@@ -1490,41 +1544,310 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("fsharp/signatureData")>]
   member x.FSharpSignatureData(p: TextDocumentPositionParams, ctok) =
-    logger.info (Log.setMessage "FSharpSignatureData Request: {parms}" >> Log.addContextDestructured "parms" p )
+    logger.info (Log.setMessage "FSharpSignatureData Request: {parms}" >> Log.addContextDestructured "parms" p)
 
     let handler f (arg: TextDocumentPositionParams) =
       async {
-          let pos = FcsPos.mkPos (p.Position.Line) (p.Position.Character + 2)
-          let file = p.TextDocument.GetFilePath() |> Utils.normalizePath
-          logger.info (Log.setMessage "FSharpSignatureData - Position request for {file} at {pos}" >> Log.addContextDestructured "file" file >> Log.addContextDestructured "pos" pos)
-          return!
-              match commands.TryGetFileCheckerOptionsWithLinesAndLineStr(file, pos) with
-              | ResultOrString.Error s ->
-                  raise (AsyncLspResult.internalError "No options")
-              | ResultOrString.Ok (options, _, lineStr) ->
-                  try
-                      async {
-                          let! tyResOpt = commands.TryGetLatestTypeCheckResultsForFile(file)
-                          return!
-                              match tyResOpt with
-                              | None ->
-                                  raise (AsyncLspResult.internalError "No typecheck results")
-                              | Some tyRes ->
-                                  async {
-                                      let! r = Async.Catch (f arg pos tyRes lineStr)
-                                      match r with
-                                      | Choice1Of2 r -> return r
-                                      | Choice2Of2 e ->
-                                          return raise (AsyncLspResult.internalError e.Message)
-                                  }
-                      }
-                  with e ->
-                      raise (AsyncLspResult.internalError e.Message)
+        let pos = FcsPos.mkPos (p.Position.Line) (p.Position.Character + 2)
+        let file = p.TextDocument.GetFilePath() |> Utils.normalizePath
+
+        logger.info (
+          Log.setMessage "FSharpSignatureData - Position request for {file} at {pos}"
+          >> Log.addContextDestructured "file" file
+          >> Log.addContextDestructured "pos" pos
+        )
+
+        return!
+          match commands.TryGetFileCheckerOptionsWithLinesAndLineStr(file, pos) with
+          | ResultOrString.Error s -> raise (AsyncLspResult.internalError "No options")
+          | ResultOrString.Ok (options, _, lineStr) ->
+              try
+                async {
+                  let! tyResOpt = commands.TryGetLatestTypeCheckResultsForFile(file)
+
+                  return!
+                    match tyResOpt with
+                    | None -> raise (AsyncLspResult.internalError "No typecheck results")
+                    | Some tyRes ->
+                        async {
+                          let! r = Async.Catch(f arg pos tyRes lineStr)
+
+                          match r with
+                          | Choice1Of2 r -> return r
+                          | Choice2Of2 e -> return raise (AsyncLspResult.internalError e.Message)
+                        }
+                }
+              with e -> raise (AsyncLspResult.internalError e.Message)
       }
 
-    p |> handler (fun p pos tyRes lineStr ->
-      let (typ, parms, generics) = commands.SignatureData tyRes pos lineStr |> CoreResponse.toRpcError
-      { Content =  CommandResponse.signatureData FsAutoComplete.JsonSerializer.writeJson (typ, parms, generics) }
-      |> async.Return
-    )
+    p
+    |> handler
+         (fun p pos tyRes lineStr ->
+           let (typ, parms, generics) = commands.SignatureData tyRes pos lineStr |> CoreResponse.toRpcError
+
+           { Content = CommandResponse.signatureData FsAutoComplete.JsonSerializer.writeJson (typ, parms, generics) }
+           |> async.Return)
+    |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("fsharp/documentationGenerator")>]
+  member x.FSharpDocumentationGenerator(p: TextDocumentPositionParams, ctok) =
+    p
+    |> x.positionHandler
+         (fun p pos tyRes lineStr lines ->
+           let (typ, parms, generics) = commands.SignatureData tyRes pos lineStr |> CoreResponse.toRpcError
+
+           { Content = CommandResponse.signatureData FsAutoComplete.JsonSerializer.writeJson (typ, parms, generics) }
+           |> async.Return)
+    |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("fsharp/lineLens")>]
+  member __.FSharpLineLens(p: ProjectParms, ctok) =
+    task {
+      let fn = p.Project.GetFilePath() |> Utils.normalizePath
+
+      let! decls =
+        commands.Declarations fn None (commands.TryGetFileVersion fn)
+        |> AsyncResult.ofCoreResponse
+        |> Async.startTaskWithCancel ctok
+
+      return { Content = CommandResponse.declarations FsAutoComplete.JsonSerializer.writeJson decls }
+    }
+
+  [<RpcMethod("lineLens/resolve")>]
+  member x.LineLensResolve(p: TextDocumentPositionParams, ctok) =
+    p
+    |> x.positionHandler
+         (fun p pos tyRes lineStr lines ->
+           let (typ, parms, generics) = commands.SignatureData tyRes pos lineStr |> CoreResponse.toRpcError
+
+           { Content = CommandResponse.signatureData FsAutoComplete.JsonSerializer.writeJson (typ, parms, generics) }
+           |> async.Return)
+    |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("fsharp/compilerLocation")>]
+  member x.FSharpCompilerLocation() =
+    let (fsc, fsi, msbuild, sdk) = commands.CompilerLocation() |> CoreResponse.toRpcError
+
+    { Content =
+        CommandResponse.compilerLocation
+          FsAutoComplete.JsonSerializer.writeJson
+          fsc
+          fsi
+          msbuild
+          (sdk |> Option.map (fun (di: DirectoryInfo) -> di.FullName)) }
+
+  [<RpcMethod("fsharp/project")>]
+  member x.FSharpProject(p: ProjectParms, ctok) =
+    task {
+      let fn = p.Project.GetFilePath()
+      let! fin = commands.Project fn config.GenerateBinlog |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+      return { Content = CommandResponse.projectLoad FsAutoComplete.JsonSerializer.writeJson fin }
+    }
+
+  [<RpcMethod("fsharp/dotnetNewList")>]
+  member x.FSharpDotnetNewList(p: DotnetNewListRequest, ctok) =
+    task {
+      let! funcs = commands.DotnetNewList() |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+      return { Content = CommandResponse.dotnetnewlist FsAutoComplete.JsonSerializer.writeJson funcs }
+    }
+
+  [<RpcMethod("fsharp/dotnetNewRun")>]
+  member x.FSharpDotnetNewRun(p: DotnetNewRunRequest, ctok) =
+    task {
+      let! _ = commands.DotnetNewRun p.Template p.Name p.Output [] |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+      return { Content = "" }
+    }
+
+  [<RpcMethod("fsharp/dotnetAddProject")>]
+  member x.FSharpDotnetAddProject(p: DotnetProjectRequest, ctok) =
+    task {
+      let! _ = commands.DotnetAddProject p.Target p.Reference |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+      return { Content = "" }
+    }
+
+  [<RpcMethod("fsharp/dotnetRemoveProject")>]
+  member x.FSharpDotnetRemoveProject(p: DotnetProjectRequest, ctok) =
+    task {
+      let! _ = commands.DotnetRemoveProject p.Target p.Reference |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+      return { Content = "" }
+    }
+
+  [<RpcMethod("fsharp/dotnetSlnAdd")>]
+  member x.FSharpDotnetSlnAdd(p: DotnetProjectRequest, ctok) =
+    task {
+      let! _ = commands.DotnetSlnAdd p.Target p.Reference |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+      return { Content = "" }
+    }
+
+  [<RpcMethod("fsproj/moveFileUp")>]
+  member x.FsprojMoveFileUp(p: DotnetFileRequest, ctok) =
+    task {
+      let! _ = commands.FsProjMoveFileUp p.FsProj p.FileVirtualPath |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+      return { Content = "" }
+    }
+
+  [<RpcMethod("fsproj/moveFileDown")>]
+  member x.FsprojMoveFileDown(p: DotnetFileRequest, ctok) =
+    task {
+      let! _ = commands.FsProjMoveFileDown p.FsProj p.FileVirtualPath |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+      return { Content = "" }
+    }
+
+  [<RpcMethod("fsproj/addFileAbove")>]
+  member x.FsprojAddFileAbove(p: DotnetFile2Request, ctok) =
+    task {
+      let! _ =
+        commands.FsProjAddFileAbove p.FsProj p.FileVirtualPath p.NewFile
+        |> AsyncResult.ofCoreResponse
+        |> Async.startTaskWithCancel ctok
+
+      return { Content = "" }
+    }
+
+  [<RpcMethod("fsproj/addFileBelow")>]
+  member x.FsprojAddFileBelow(p: DotnetFile2Request, ctok) =
+    task {
+      let! _ =
+        commands.FsProjAddFileBelow p.FsProj p.FileVirtualPath p.NewFile
+        |> AsyncResult.ofCoreResponse
+        |> Async.startTaskWithCancel ctok
+
+      return { Content = "" }
+    }
+
+  [<RpcMethod("fsproj/addFile")>]
+  member x.FsprojAddFile(p: DotnetFileRequest, ctok) =
+    task {
+      let! _ = commands.FsProjAddFile p.FsProj p.FileVirtualPath |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+      return { Content = "" }
+    }
+
+  [<RpcMethod("fsharp/help")>]
+  member x.FSharpHelp(p: TextDocumentPositionParams, ctok) =
+    p
+    |> x.positionHandler
+         (fun p pos tyRes lineStr lines ->
+           let t = commands.Help tyRes pos lineStr |> CoreResponse.toRpcError
+           { Content = CommandResponse.help FsAutoComplete.JsonSerializer.writeJson t } |> async.Return)
+    |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("fsharp/documentation")>]
+  member x.FSharpDocumentation(p: TextDocumentPositionParams, ctok) =
+    p
+    |> x.positionHandler
+         (fun p pos tyRes lineStr lines ->
+           let (tip, xml, signature, footer, cm) = commands.FormattedDocumentation tyRes pos lineStr |> CoreResponse.toRpcError
+
+           { Content = CommandResponse.formattedDocumentation FsAutoComplete.JsonSerializer.writeJson (tip, xml, signature, footer, cm) }
+           |> async.Return)
+    |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("fsharp/documentationSymbol")>]
+  member x.FSharpDocumentationSymbol(p: DocumentationForSymbolRequest, ctok) =
+    match commands.LastCheckResult with
+    | None -> raise (AsyncLspResult.internalError "error")
+    | Some tyRes ->
+        let (xml, assembly, doc, signature, footer, cn) =
+          commands.FormattedDocumentationForSymbol tyRes p.XmlSig p.Assembly |> Result.ofCoreResponse
+
+        { Content =
+            CommandResponse.formattedDocumentationForSymbol FsAutoComplete.JsonSerializer.writeJson xml assembly doc (signature, footer, cn) }
+        |> async.Return
+
+  [<RpcMethod("fsharp/loadAnalyzers")>]
+  member x.FSharpLoadAnalyzers(ctok) =
+    task {
+      try
+        if config.EnableAnalyzers then
+          Loggers.analyzers.info (
+            Log.setMessage "Using analyzer roots of {roots}" >> Log.addContextDestructured "roots" config.AnalyzersPath
+          )
+
+          config.AnalyzersPath
+          |> Array.iter
+               (fun analyzerPath ->
+                 match rootPath with
+                 | None -> ()
+                 | Some workspacePath ->
+                     let dir =
+                       if System.IO.Path.IsPathRooted analyzerPath
+                       // if analyzer is using absolute path, use it as is
+                       then
+                         analyzerPath
+                       // otherwise, it is a relative path and should be combined with the workspace path
+                       else
+                         System.IO.Path.Combine(workspacePath, analyzerPath)
+
+                     Loggers.analyzers.info (Log.setMessage "Loading analyzers from {dir}" >> Log.addContextDestructured "dir" dir)
+                     let (n, m) = dir |> FSharp.Analyzers.SDK.Client.loadAnalyzers
+
+                     Loggers.analyzers.info (
+                       Log.setMessage "From {name}: {dllNo} dlls including {analyzersNo} analyzers"
+                       >> Log.addContextDestructured "name" analyzerPath
+                       >> Log.addContextDestructured "dllNo" n
+                       >> Log.addContextDestructured "analyzersNo" m
+                     ))
+        // otherwise, it is a relative path and should be combined with the workspace path
+        else
+          Loggers.analyzers.info (Log.setMessage "Analyzers disabled")
+
+        return ()
+      with ex ->
+        Loggers.analyzers.error (Log.setMessage "Loading failed" >> Log.addExn ex)
+        return ()
+    }
+
+  member private x.handleSemanticTokens
+    (getTokens: Async<option<(struct (FcsRange * SemanticClassificationType)) array>>)
+    : Async<SemanticTokens option> =
+    async {
+      match! getTokens with
+      | None -> return raise (AsyncLspResult.internalError "No highlights found")
+      | Some rangesAndHighlights ->
+          let lspTypedRanges =
+            rangesAndHighlights
+            |> Array.map
+                 (fun (struct (fcsRange, fcsTokenType)) ->
+                   let ty, mods = ClassificationUtils.map fcsTokenType
+                   struct (fcsRangeToLsp fcsRange, ty, mods))
+
+          match encodeSemanticHighlightRanges lspTypedRanges with
+          | None -> return None
+          | Some encoded -> return Some { Data = encoded; ResultId = None } // TODO: provide a resultId when we support delta ranges
+    }
+
+  [<RpcMethod("textDocument/semanticTokens/full")>]
+  member x.TextDocumentSemanticTokensFull(p: SemanticTokensParams, ctok) : Task<SemanticTokens option> =
+    logger.info (Log.setMessage "Semantic highlighing request: {parms}" >> Log.addContextDestructured "parms" p)
+    let fn = p.TextDocument.GetFilePath() |> Utils.normalizePath
+    let getTokens = commands.GetHighlighting(fn, None) |> AsyncResult.ofCoreResponse
+    x.handleSemanticTokens (getTokens) |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("textDocument/semanticTokens/range")>]
+  member x.TextDocumentSemanticTokensRange(p: SemanticTokensRangeParams, ctok) : Task<SemanticTokens option> =
+    logger.info (Log.setMessage "Semantic highlighing range request: {parms}" >> Log.addContextDestructured "parms" p)
+    let fn = p.TextDocument.GetFilePath() |> Utils.normalizePath
+    let fcsRange = protocolRangeToRange (UMX.untag fn) p.Range
+    let getTokens = commands.GetHighlighting(fn, Some fcsRange) |> AsyncResult.ofCoreResponse
+    x.handleSemanticTokens (getTokens) |> Async.startTaskWithCancel ctok
+
+  [<RpcMethod("fsharp/fsharpLiterate")>]
+  member x.FSharpFSharpLiterate(p: FSharpLiterateRequest, ctok) =
+    task {
+      logger.info (Log.setMessage "FSharpLiterate Request: {parms}" >> Log.addContextDestructured "parms" p)
+      let fn = p.FileName |> Utils.normalizePath
+      let! res = commands.FSharpLiterate fn |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
+      return { Content = CommandResponse.fsharpLiterate FsAutoComplete.JsonSerializer.writeJson res }
+    }
+
+  [<RpcMethod("fsharp/pipelineHints")>]
+  member x.FSharpPipelineHints(p: FSharpPipelineHintRequest, ctok) =
+    logger.info (Log.setMessage "FSharpPipelineHints Request: {parms}" >> Log.addContextDestructured "parms" p)
+    let fn = p.FileName |> Utils.normalizePath
+
+    fn
+    |> x.fileHandler
+         (fun fn tyRes lines ->
+           let res = commands.PipelineHints tyRes |> CoreResponse.toRpcError
+           { Content = CommandResponse.pipelineHint FsAutoComplete.JsonSerializer.writeJson res } |> async.Return)
     |> Async.startTaskWithCancel ctok
