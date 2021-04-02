@@ -14,6 +14,10 @@ open FsAutoComplete
 open Ionide.ProjInfo.ProjectSystem
 open FSharp.UMX
 open System.Reactive.Linq
+open StreamJsonRpc
+open Newtonsoft.Json
+open System.Threading.Tasks
+
 type BackgroundFileCheckType =
 | SourceFile of filePath: string
 | ScriptFile of filePath: string * tfm: FSIRefs.TFM
@@ -97,31 +101,58 @@ module Helpers =
             "file:///" + (uri.ToString()).TrimStart('/')
 
 
-type FsacClient(sendServerNotification: ClientNotificationSender, sendServerRequest: ClientRequestSender) =
-    inherit LspClient ()
+module JsonRpc =
+  let configureJsonRpcHandler(inStream: Stream, outStream: Stream) =
+    // using a custom formatter so that we can add our own
+    // * converters
+    // * naming strategy
+    // * ignoring of missing members on payloads for forward-compatibility
+    // this lines up with the serializers used in the prior implementation
+    let formatter : IJsonRpcMessageTextFormatter =
+      let formatter = new JsonMessageFormatter()
+      formatter.JsonSerializer.Converters
+      |> Seq.tryFind (fun c -> c.GetType() = typeof<Newtonsoft.Json.Converters.DiscriminatedUnionConverter>)
+      |> Option.iter (fun c -> formatter.JsonSerializer.Converters.Remove c |> ignore<bool>)
 
-    member __.SendDiagnostics(p: PublishDiagnosticsParams) =
-        sendServerNotification "background/diagnostics" (box p) |> Async.Ignore
+      for converter in LanguageServerProtocol.Server.customConverters do
+        formatter.JsonSerializer.Converters.Add converter
 
-    member __.Notify(o: Msg) =
-        sendServerNotification "background/notify" o |> Async.Ignore
+      formatter.JsonSerializer.MissingMemberHandling <- MissingMemberHandling.Ignore
+      formatter.JsonSerializer.ContractResolver <- Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()
+      formatter :> _
+    // LSP uses a header-delimited message stream, so we use the handler that understands that format
+    let handler = new StreamJsonRpc.HeaderDelimitedMessageHandler(outStream, inStream, formatter)
+    handler
 
-type BackgroundServiceServer(state: State, client: FsacClient) =
-    inherit LspServer()
+type FsacClient(rpc: JsonRpc) =
+
+  member __.SendDiagnostics(p: PublishDiagnosticsParams) =
+    rpc.NotifyWithParameterObjectAsync("background/diagnostics", p)
+
+  member __.Notify(o: Msg) =
+    rpc.NotifyWithParameterObjectAsync("background/notify", 0)
+
+type BackgroundServiceServer(sender: Stream, reader: Stream, state: State) as this =
+
 
     let checker = FSharpChecker.Create(projectCacheSize = 1, keepAllBackgroundResolutions = false, suggestNamesForErrors = false)
 
-    do checker.ImplicitlyStartBackgroundWork <- false
     let mutable latestSdkVersion = lazy None
     let mutable latestRuntimeVersion = lazy None
     //TODO: does the backgroundservice ever get config updates?
+    let rpc =
+      let handler = JsonRpc.configureJsonRpcHandler (reader, sender)
+      new JsonRpc(handler, this)
+
+    let mutable client = FsacClient(rpc)
+
     do
+      checker.ImplicitlyStartBackgroundWork <- false
       let sdkRoot = Environment.dotnetSDKRoot.Value
       if sdkRoot.Exists
       then
         latestSdkVersion <- Environment.latest3xSdkVersion sdkRoot
         latestRuntimeVersion <- Environment.latest3xRuntimeVersion sdkRoot
-
 
     let getFilesFromOpts (opts: FSharpProjectOptions) =
         (if Array.isEmpty opts.SourceFiles then
@@ -172,8 +203,8 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
         | SourceFile file ->
             match state.FileCheckOptions.TryFind (Utils.normalizePath file) with
             | None ->
-                client.Notify {Value = sprintf "Couldn't find file check options for %A" file } |> Async.Start
-                client.Notify {Value = sprintf "Known files %A" (state.FileCheckOptions.Keys |> Seq.toArray) } |> Async.Start
+                client.Notify {Value = sprintf "Couldn't find file check options for %A" file } |> ignore<Task>
+                client.Notify {Value = sprintf "Known files %A" (state.FileCheckOptions.Keys |> Seq.toArray) } |> ignore<Task>
                 None
             | Some opts ->
                 let sf = getFilesFromOpts opts
@@ -186,14 +217,14 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
 
     let typecheckFile ignoredFile (file: string<LocalPath>) =
         async {
-            do! client.Notify {Value = sprintf "Typechecking %s" (UMX.untag file) }
+            do! client.Notify {Value = sprintf "Typechecking %s" (UMX.untag file) } |> Async.AwaitTask
             match state.Files.TryFind file, state.FileCheckOptions.TryFind file with
             | Some vf, Some opts ->
                 let txt = vf.Lines |> String.concat "\n"
                 let! pr, cr = checker.ParseAndCheckFileInProject(UMX.untag file, defaultArg vf.Version 0, SourceText.ofString txt, opts)
                 match cr with
                 | FSharpCheckFileAnswer.Aborted ->
-                    do! client.Notify {Value = sprintf "Typechecking aborted %s" (UMX.untag file) }
+                    do! client.Notify {Value = sprintf "Typechecking aborted %s" (UMX.untag file) } |> Async.AwaitTask
                     return ()
                 | FSharpCheckFileAnswer.Succeeded res ->
                     let symbols = res.GetAllUsesOfAllSymbolsInFile()
@@ -203,7 +234,7 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
                     | _ ->
                         let errors = Array.append pr.Errors res.Errors |> Array.map (Helpers.fcsErrorToDiagnostic)
                         let msg = {Diagnostics = errors; Uri = Helpers.filePathToUri file}
-                        do! client.SendDiagnostics msg
+                        do! client.SendDiagnostics msg |> Async.AwaitTask
                         return ()
             | Some vf, None when (UMX.untag file).EndsWith ".fsx" ->
                 let txt = vf.Lines |> String.concat "\n"
@@ -211,7 +242,7 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
                 let! pr, cr = checker.ParseAndCheckFileInProject(UMX.untag file, defaultArg vf.Version 0, SourceText.ofString txt, opts)
                 match cr with
                 | FSharpCheckFileAnswer.Aborted ->
-                    do! client.Notify {Value = sprintf "Typechecking aborted %s" (UMX.untag file) }
+                    do! client.Notify {Value = sprintf "Typechecking aborted %s" (UMX.untag file) } |> Async.AwaitTask
                     return ()
                 | FSharpCheckFileAnswer.Succeeded res ->
                     let symbols = res.GetAllUsesOfAllSymbolsInFile()
@@ -221,10 +252,10 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
                     | _ ->
                         let errors = Array.append pr.Errors res.Errors |> Array.map (Helpers.fcsErrorToDiagnostic)
                         let msg = {Diagnostics = errors; Uri = Helpers.filePathToUri file}
-                        do! client.SendDiagnostics msg
+                        do! client.SendDiagnostics msg |> Async.AwaitTask
                         return ()
             | _ ->
-                do! client.Notify {Value = sprintf "Couldn't find state %s" (UMX.untag file) }
+                do! client.Notify {Value = sprintf "Couldn't find state %s" (UMX.untag file) } |> Async.AwaitTask
                 return ()
         }
 
@@ -313,7 +344,7 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
             if File.Exists f.FileName then ()
             else
               let! _ = SymbolCache.deleteFile f.FileName
-              do! client.Notify { Value = sprintf "Cleaned file %s" f.FileName }
+              do! client.Notify { Value = sprintf "Cleaned file %s" f.FileName } |> Async.AwaitTask
               ()
       }
 
@@ -321,23 +352,23 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
         Observable.Interval(TimeSpan.FromMinutes(5.))
         |> Observable.subscribe(fun _ -> clearOldFilesFromCache () |> Async.Start)
 
+    [<JsonRpcMethod("background/update", UseSingleObjectParameterDeserialization=true)>]
     member __.UpdateTextFile(p: UpdateFileParms) =
         async {
-            do! client.Notify {Value = sprintf "File update %s" p.File.FilePath }
+            do! client.Notify {Value = sprintf "File update %s" p.File.FilePath } |> Async.AwaitTask
             let file = Utils.normalizePath p.File.FilePath
 
             let vf = {Lines = p.Content.Split( [|'\n' |] ); Touched = DateTime.Now; Version = Some p.Version  }
             state.Files.AddOrUpdate(file, (fun _ -> vf),( fun _ _ -> vf) ) |> ignore
             let! filesToCheck = defaultArg (getListOfFilesForProjectChecking p.File) (async.Return [])
-            do! client.Notify { Value = sprintf "Files to check %A" filesToCheck }
+            do! client.Notify { Value = sprintf "Files to check %A" filesToCheck } |> Async.AwaitTask
             bouncer.Bounce (false, file,filesToCheck)
             return LspResult.success ()
         }
 
+    [<JsonRpcMethod("background/project", UseSingleObjectParameterDeserialization=true)>]
     member __.UpdateProject(p: ProjectParms) =
         async {
-
-
             let sf = getFilesFromOpts p.Options
 
             sf
@@ -345,16 +376,17 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
                 state.FileCheckOptions.AddOrUpdate(file, (fun _ -> p.Options), (fun _ _ -> p.Options))
                 |> ignore
             )
-            do! client.Notify {Value = sprintf "Project Updated %s" p.Options.ProjectFileName}
+            do! client.Notify {Value = sprintf "Project Updated %s" p.Options.ProjectFileName} |> Async.AwaitTask
             return LspResult.success ()
         }
 
+    [<JsonRpcMethod("background/save", UseSingleObjectParameterDeserialization=true)>]
     member __.FileSaved(p: FileParms) =
         async {
 
             let file = Utils.normalizePath p.File.FilePath
 
-            do! client.Notify {Value = sprintf "File Saved %s " (UMX.untag file) }
+            do! client.Notify {Value = sprintf "File Saved %s " (UMX.untag file) } |> Async.AwaitTask
 
             let projects = getDependingProjects file
             let! filesToCheck = defaultArg (getListOfFilesForProjectChecking p.File) (async.Return [])
@@ -367,26 +399,14 @@ type BackgroundServiceServer(state: State, client: FsacClient) =
             return LspResult.success ()
         }
 
-    override _.Dispose () =
-      clearOldCacheSubscription.Dispose()
+    member _.WaitForClose = rpc.Completion
 
+    interface IDisposable with
+      member _.Dispose () =
+        clearOldCacheSubscription.Dispose()
 
 module Program =
     let state = State.Initial
-
-    let startCore () =
-        use input = Console.OpenStandardInput()
-        use output = Console.OpenStandardOutput()
-
-        let requestsHandlings =
-            Map.empty<string, RequestHandling<BackgroundServiceServer>>
-            |> Map.add "background/update" (requestHandling (fun s p -> s.UpdateTextFile(p) ))
-            |> Map.add "background/project" (requestHandling (fun s p -> s.UpdateProject(p) ))
-            |> Map.add "background/save" (requestHandling (fun s p -> s.FileSaved(p) ))
-
-        LanguageServerProtocol.Server.start requestsHandlings input output FsacClient (fun lspClient -> new BackgroundServiceServer(state, lspClient))
-
-
 
     [<EntryPoint>]
     let main argv =
@@ -397,5 +417,6 @@ module Program =
         FileSystemAutoOpens.FileSystem <- fs
         ProcessWatcher.zombieCheckWithHostPID (fun () -> exit 0) pid
         SymbolCache.initCache (Environment.CurrentDirectory)
-        let _ = startCore()
+        let server = new BackgroundServiceServer(Console.OpenStandardOutput(), Console.OpenStandardInput(), state)
+        server.WaitForClose.GetAwaiter().GetResult()
         0
