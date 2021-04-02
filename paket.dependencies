@@ -30,6 +30,7 @@ nuget FSharp.Core
 nuget Dapper
 nuget Microsoft.Data.Sqlite 2.2.4
 nuget Microsoft.Data.Sqlite.Core 2.2.4
+nuget Nerdbank.Streams
 nuget ply
 nuget SerilogTraceListener
 nuget SQLitePCLRaw.bundle_green 1.1.14

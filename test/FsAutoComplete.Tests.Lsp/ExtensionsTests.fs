@@ -46,8 +46,7 @@ let linterTests toolsPath workspaceLoaderFactory =
     let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "LinterTest")
     let (server, event) = serverInitialize path {defaultConfigDto with Linter = Some true} toolsPath workspaceLoaderFactory
 
-    let m = new System.Threading.ManualResetEvent(false)
-    let bag = event |> waitForParsedScript m
+    let bag = event |> waitForParsedScript
 
 
     let projectPath = Path.Combine(path, "LinterTest.fsproj")
@@ -55,9 +54,6 @@ let linterTests toolsPath workspaceLoaderFactory =
     let path = Path.Combine(path, "Script.fs")
     let tdop : DidOpenTextDocumentParams = { TextDocument = loadDocument path}
     do server.TextDocumentDidOpen(tdop, CancellationToken.None).Wait()
-
-    m.WaitOne() |> ignore
-
     (server, path, bag)
   )
   let serverTest f () =
@@ -150,10 +146,8 @@ let linterTests toolsPath workspaceLoaderFactory =
 
   testSequenced <| ptestList "Linter Test" [
     testCase "Linter Diagnostics" (serverTest (fun server path bag ->
-      let (b,(uri, diags)) = bag.TryPeek()
-      if b then
-        Expect.equal diags diagnostics "Linter messages match"
-      else failtest "No diagnostic message received"
+      let uri, diags = bag |> Async.RunSynchronously
+      Expect.equal diags diagnostics "Linter messages match"
      ))
 
     testCase "Linter Code Action" (serverTest (fun server path _ ->
@@ -229,7 +223,7 @@ let formattingTests toolsPath workspaceLoaderFactory =
   let serverStart = lazy (
     let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "Formatting")
     let (server, events) = serverInitialize path defaultConfigDto toolsPath workspaceLoaderFactory
-    do waitForWorkspaceFinishedParsing events
+    do waitForWorkspaceFinishedParsing events |> Async.RunSynchronously
     server, events, path
   )
   let serverTest f () = f serverStart.Value
@@ -304,7 +298,7 @@ let analyzerTests toolsPath workspaceLoaderFactory =
 
     let (server, events) = serverInitialize path analyzerEnabledConfig toolsPath workspaceLoaderFactory
     let scriptPath = Path.Combine(path, "Script.fs")
-    do waitForWorkspaceFinishedParsing events
+    do waitForWorkspaceFinishedParsing events |> Async.RunSynchronously
     do server.TextDocumentDidOpen({ TextDocument = loadDocument scriptPath }, CancellationToken.None).Wait()
     server, events, path, scriptPath
   )
@@ -316,7 +310,7 @@ let analyzerTests toolsPath workspaceLoaderFactory =
       do server.TextDocumentDidOpen({ TextDocument = loadDocument testFilePath }, CancellationToken.None).Wait()
       // now wait for analyzer events for the file:
 
-      let diagnostics = analyzerEvents (System.IO.Path.GetFileName testFilePath) events |> Async.AwaitEvent |> Async.RunSynchronously
+      let (filename, diagnostics) = analyzerEvents (System.IO.Path.GetFileName testFilePath) events |> Async.AwaitObservable |> Async.RunSynchronously
       let expected =
         [|{ Range = { Start = { Line = 3
                                 Character = 13 }

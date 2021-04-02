@@ -74,7 +74,6 @@ let main args =
           | _ -> false
         | _ -> false
       )
-
       .Destructure.FSharpTypes()
       .Destructure.ByTransforming<FSharp.Compiler.Text.Range>(fun r -> box {| FileName = r.FileName; Start = r.Start; End = r.End |})
       .Destructure.ByTransforming<FSharp.Compiler.Text.Pos>(fun r -> box {| Line = r.Line; Column = r.Column |})

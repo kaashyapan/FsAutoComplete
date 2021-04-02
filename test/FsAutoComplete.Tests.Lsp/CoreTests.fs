@@ -302,7 +302,7 @@ let autocompleteTest toolsPath workspaceLoaderFactory =
   let scriptProjServerStart = lazy (
     let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "AutocompleteScriptTest")
     let (server, event) = serverInitialize path defaultConfigDto toolsPath workspaceLoaderFactory
-    do waitForWorkspaceFinishedParsing event
+    do waitForWorkspaceFinishedParsing event |> Async.RunSynchronously
     let path = Path.Combine(path, "Script.fsx")
     let tdop : DidOpenTextDocumentParams = { TextDocument = loadDocument path}
     do server.TextDocumentDidOpen(tdop, CancellationToken.None).GetAwaiter().GetResult()
@@ -433,7 +433,7 @@ let renameTest toolsPath workspaceLoaderFactory =
     let pathTest = Path.Combine(testDir, "Test.fs")
     let path = Path.Combine(testDir, "Program.fs")
 
-    do waitForWorkspaceFinishedParsing event
+    do waitForWorkspaceFinishedParsing event |> Async.RunSynchronously
 
     let tdop : DidOpenTextDocumentParams = { TextDocument = loadDocument pathTest}
     do server.TextDocumentDidOpen(tdop, CancellationToken.None).GetAwaiter().GetResult()
@@ -498,7 +498,7 @@ let gotoTest toolsPath workspaceLoaderFactory =
     let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "GoToTests")
 
     let (server, event) = serverInitialize path defaultConfigDto toolsPath workspaceLoaderFactory
-    do waitForWorkspaceFinishedParsing event
+    do waitForWorkspaceFinishedParsing event |> Async.RunSynchronously
     System.Threading.Thread.Sleep 1000
     let definitionPath = Path.Combine(path, "Definition.fs")
     let tdop : DidOpenTextDocumentParams = { TextDocument = loadDocument definitionPath }
@@ -797,7 +797,7 @@ let foldingTests toolsPath workspaceLoaderFactory=
     let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "FoldingTests")
 
     let (server, event) = serverInitialize path defaultConfigDto toolsPath workspaceLoaderFactory
-    do waitForWorkspaceFinishedParsing event
+    do waitForWorkspaceFinishedParsing event |> Async.RunSynchronously
     let libraryPath = Path.Combine(path, "Library.fs")
     let libFile = loadDocument libraryPath
     let tdop : DidOpenTextDocumentParams = { TextDocument = libFile }
@@ -831,7 +831,7 @@ let tooltipTests toolsPath workspaceLoaderFactory =
     let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "Tooltips")
     let scriptPath = Path.Combine(path, "Script.fsx")
     let (server, events) = serverInitialize path defaultConfigDto toolsPath workspaceLoaderFactory
-    do waitForWorkspaceFinishedParsing events
+    do waitForWorkspaceFinishedParsing events |> Async.RunSynchronously
     do server.TextDocumentDidOpen({ TextDocument = loadDocument scriptPath }, CancellationToken.None) |> ignore<Task<unit>>
     match waitForParseResultsForFile "Script.fsx" events with
     | Ok () ->
@@ -989,7 +989,7 @@ let signatureHelpTests toolsPath workspaceLoaderFactory =
     let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "SignatureHelpTest")
     let scriptPath = Path.Combine(path, "Script1.fsx")
     let (server, events) = serverInitialize path defaultConfigDto toolsPath workspaceLoaderFactory
-    do waitForWorkspaceFinishedParsing events
+    do waitForWorkspaceFinishedParsing events |> Async.RunSynchronously
     do server.TextDocumentDidOpen({ TextDocument = loadDocument scriptPath }, CancellationToken.None).Wait()
     match waitForParseResultsForFile "Script1.fsx" events with
     | Ok () ->

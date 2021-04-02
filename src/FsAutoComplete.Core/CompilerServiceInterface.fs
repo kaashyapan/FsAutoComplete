@@ -108,7 +108,7 @@ type FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzers) =
 
   let logQueueLength (logger: ILog) msg =
     checkerLogger.trace (Log.setMessage "Current Queue Length is {queueLength}" >> Log.addContextDestructured "queueLength" checker.CurrentQueueLength)
-    logger.info msg
+    logger.debug msg
 
   /// replace any BCL/FSharp.Core/FSI refs that FCS gives us with our own set, which is more probe-able
   let replaceFrameworkRefs (projOptions: FSharpProjectOptions) =

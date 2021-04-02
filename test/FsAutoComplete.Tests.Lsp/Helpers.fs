@@ -11,6 +11,18 @@ open FsAutoComplete.LspHelpers
 open StreamJsonRpc
 open System.Threading.Tasks
 open FSharp.UMX
+open Nerdbank.Streams
+open System.Diagnostics
+open Newtonsoft.Json.Linq
+
+/// Helper that can be used for writing CPS-style code that resumes
+/// on the same thread where the operation was started.
+let private synchronize f =
+  let ctx = System.Threading.SynchronizationContext.Current
+  f (fun g ->
+    let nctx = System.Threading.SynchronizationContext.Current
+    if ctx <> null && ctx <> nctx then ctx.Post((fun _ -> g()), null)
+    else g() )
 
 type Async =
   /// Creates an asynchronous workflow that non-deterministically returns the
@@ -60,46 +72,109 @@ type Async =
       works |> Seq.iteri (fun index work ->
         Async.StartImmediate(run index work)) )
 
+  /// Creates an asynchronous workflow that will be resumed when the
+  /// specified observables produces a value. The workflow will return
+  /// the value produced by the observable.
+  static member AwaitObservable(observable : IObservable<'T1>) =
+      let removeObj : IDisposable option ref = ref None
+      let removeLock = new obj()
+      let setRemover r =
+          lock removeLock (fun () -> removeObj := Some r)
+      let remove() =
+          lock removeLock (fun () ->
+              match !removeObj with
+              | Some d -> removeObj := None
+                          d.Dispose()
+              | None   -> ())
+      synchronize (fun f ->
+      let workflow =
+          Async.FromContinuations((fun (cont,econt,ccont) ->
+              let rec finish cont value =
+                  remove()
+                  f (fun () -> cont value)
+              setRemover <|
+                  observable.Subscribe
+                      ({ new IObserver<_> with
+                          member x.OnNext(v) = finish cont v
+                          member x.OnError(e) = finish econt e
+                          member x.OnCompleted() =
+                              let msg = "Cancelling the workflow, because the Observable awaited using AwaitObservable has completed."
+                              finish ccont (new System.OperationCanceledException(msg)) })
+              () ))
+      async {
+          let! cToken = Async.CancellationToken
+          use _registration = cToken.Register((fun _ -> remove()), null)
+          return! workflow
+      })
+
 let logger = Expecto.Logging.Log.create "LSPTests"
 
 type ClientEvents =
 | WorkspacePeek of interestingItems : list<Ionide.ProjInfo.ProjectSystem.WorkspacePeek.Interesting>
 | Diagnostics of uri: DocumentUri * diagnostics: Diagnostic []
 | FileParsed of filePath: string<LocalPath>
-| NotifyWorkspace of project: Ionide.ProjInfo.ProjectSystem.ProjectResponse
+| WorkspaceLoad of project: CommandResponse.WorkspaceLoadResponse
+| Cancelled of message: string
+| ProjectLoading of CommandResponse.ProjectLoadingResponse
+| ProjectLoaded of CommandResponse.ProjectResponse
+| ProjectLoadError of CommandResponse.ResponseError<obj>
+
+let (| Response |) ({ Content = payload}): 't =
+  let response: CommandResponse.ResponseMsg<'t> = JsonSerializer.readJson payload
+  response.Data
+
+type TestNotificationClient() =
+  let clientEvents = new System.Reactive.Subjects.ReplaySubject<_>(Int32.MaxValue)
+  [<JsonRpcMethod("notify/workspacePeek", UseSingleObjectParameterDeserialization = true)>]
+  member x.NotifyWorkspacePeek(Response interestingItems) =
+    clientEvents.OnNext (ClientEvents.WorkspacePeek interestingItems)
+
+  [<JsonRpcMethod("textDocument/publishDiagnostics", UseSingleObjectParameterDeserialization = true)>]
+  member x.TextDocumentPublishDiagnostics(p: PublishDiagnosticsParams) =
+    clientEvents.OnNext (ClientEvents.Diagnostics(p.Uri, p.Diagnostics))
+
+  [<JsonRpcMethod("fsharp/fileParsed", UseSingleObjectParameterDeserialization = true)>]
+  member x.NotifyFileParsed({ Content = localPath} ) =
+    clientEvents.OnNext (ClientEvents.FileParsed (UMX.tag localPath))
+
+  [<JsonRpcMethod("fsharp/notifyWorkspace", UseSingleObjectParameterDeserialization = true)>]
+  member x.NotifyWorkspace({ Content = payload }) =
+    let t : CommandResponse.ResponseMsg<JToken> = JsonSerializer.readJson payload
+    match t.Kind with
+    | "workspaceLoad" -> t.Data.ToObject<CommandResponse.WorkspaceLoadResponse>() |> ClientEvents.WorkspaceLoad |> Some
+    | "projectLoading" -> t.Data.ToObject<CommandResponse.ProjectLoadingResponse>() |> ClientEvents.ProjectLoading |> Some
+    | "project" -> t.Data.ToObject<CommandResponse.ProjectResponse>() |> ClientEvents.ProjectLoaded |> Some
+    | "error" -> t.Data.ToObject<CommandResponse.ResponseError<obj>>() |> ClientEvents.ProjectLoadError |> Some
+    | _ -> None
+    |> Option.iter clientEvents.OnNext
+
+  [<JsonRpcMethod("fsharp/notifyCancel", UseSingleObjectParameterDeserialization = true)>]
+  member x.NotifyCancelledRequest(message: string) =
+    clientEvents.OnNext (ClientEvents.Cancelled message)
+
+  member x.Events = clientEvents :> IObservable<_>
 
 let createServer (toolsPath) workspaceLoaderFactory =
-  let mockInput = new MemoryStream()
-  let mockOutput = new MemoryStream()
-  let event = Event<ClientEvents> ()
+  let struct(serverStream, clientStream) = FullDuplexStream.CreatePair()
+
   let originalFs = FSharp.Compiler.SourceCodeServices.FileSystemAutoOpens.FileSystem
   let state = State.Initial toolsPath workspaceLoaderFactory
   let fs = FsAutoComplete.FileSystem(originalFs, state.Files.TryFind)
   FSharp.Compiler.SourceCodeServices.FileSystemAutoOpens.FileSystem <- fs
-  let server = new FSharpLspServer(mockInput, mockOutput, false, state)
-  let client =
-    { new FSharpLspClient(null) with
-        override x.NotifyWorkspacePeek(interestingItems: list<Ionide.ProjInfo.ProjectSystem.WorkspacePeek.Interesting>) =
-          event.Trigger (ClientEvents.WorkspacePeek interestingItems)
-          Task.CompletedTask
+  let server = new FSharpLspServer(serverStream, serverStream, false, state)
+  let clientEvents =
+    let clientRpcHandler = LspServer.configureJsonRpcHandler (clientStream, clientStream)
+    let c = TestNotificationClient()
+    let rpc = new JsonRpc(clientRpcHandler, c)
+    // re-enable these tracing lines if you need to see logs from the test client
+    // rpc.TraceSource <- new TraceSource("TestFSharpLspClient", SourceLevels.Verbose)
+    // rpc.TraceSource.Listeners.Add(new SerilogTraceListener.SerilogTraceListener("TestFSharpLspClient"))
+    // |> ignore<int>
+    // start the pipes flowing
+    rpc.StartListening()
+    c.Events
 
-        override x.TextDocumentPublishDiagnostics(uri: DocumentUri, diagnostics: Diagnostic []) =
-          event.Trigger (ClientEvents.Diagnostics(uri, diagnostics))
-          Task.CompletedTask
-
-        override x.NotifyFileParsed(localPath) =
-          event.Trigger (ClientEvents.FileParsed localPath)
-          Task.CompletedTask
-
-        override x.NotifyWorkspace(project) =
-          event.Trigger (ClientEvents.NotifyWorkspace project)
-          Task.CompletedTask
-
-        override x.NotifyCancelledRequest(message: string) =
-          Task.CompletedTask
-      }
-  server.Client <- client
-  server, event
+  server, clientEvents
 
 let defaultConfigDto : FSharpConfigDto =
   { WorkspaceModePeekDeepLevel = None
@@ -236,6 +311,7 @@ let clientCaps : ClientCapabilities =
 open Expecto.Logging
 open Expecto.Logging.Message
 open System.Threading
+open Ionide.ProjInfo.ProjectSystem
 
 
 let logEvent n =
@@ -290,8 +366,7 @@ let serverInitialize path (config: FSharpConfigDto) toolsPath workspaceLoaderFac
 
   let server, event = createServer toolsPath workspaceLoaderFactory
 
-  event.Publish
-  |> Event.add logEvent
+  event.Subscribe logEvent |> ignore<IDisposable>
 
   let p : InitializeParams =
     { ProcessId = Some 1
@@ -321,54 +396,47 @@ let parseProject projectFilePath (server: FSharpLspServer) = async {
   logger.debug (eventX "{project} parse result: {result}" >> setField "result" (sprintf "%A" result) >> setField "project" projectName)
 }
 
-let waitForWorkspaceFinishedParsing (event : Event<ClientEvents>) =
-  Thread.Sleep (TimeSpan.FromSeconds 3.)
+let waitForWorkspaceFinishedParsing (events : IObservable<ClientEvents>) =
+  events
+  |> Observable.choose (function | ClientEvents.WorkspaceLoad { Status = "finished" } -> Some () | _ -> None)
+  |> Async.AwaitObservable
 
 let private getDiagnosticsEvents =
-  Event.choose (function ClientEvents.Diagnostics (uri, diags) -> Some (uri, diags) | _ -> None )
+  Observable.choose (function ClientEvents.Diagnostics (uri, diags) -> Some (uri, diags) | _ -> None)
 
 /// note that the files here are intended to be the filename only., not the full URI.
 let private matchFiles (files: string Set) =
-  Event.choose (fun (uri: DocumentUri, diags) ->
+  Observable.choose (fun (uri: DocumentUri, diags) ->
     let filename = uri.Split([| '/'; '\\' |], StringSplitOptions.RemoveEmptyEntries) |> Array.last
     if Set.contains filename files
     then Some (filename, diags)
     else None
   )
 
-let private fileDiagnostics file (events: Event<ClientEvents>) =
+let private fileDiagnostics file (events: IObservable<ClientEvents>) =
   logger.info (eventX "waiting for events on file {file}" >> setField "file" file)
-  events.Publish
+  events
   |> getDiagnosticsEvents
   |> matchFiles (Set.ofList [file])
 
 let analyzerEvents file events =
   fileDiagnostics file events
-  |> Event.map snd
-  |> Event.filter (fun diags -> diags |> Array.exists (fun d -> d.Source.StartsWith "F# Analyzers"))
+  |> Observable.choose (fun (filename, diags) -> if diags |> Array.exists (fun d -> d.Source.StartsWith "F# Analyzers") then Some (filename, diags) else None)
 
-let waitForParseResultsForFile file (events: Event<ClientEvents>) =
+let waitForParseResultsForFile file (events: IObservable<ClientEvents>) =
   let matchingFileEvents = fileDiagnostics file events
   async {
-    let! (filename, diags) = Async.AwaitEvent matchingFileEvents
+    let! (filename, diags) = Async.AwaitObservable matchingFileEvents
     match diags with
     | [||] -> return Ok ()
     | errors -> return Core.Result.Error errors
   }
   |> Async.RunSynchronously
 
-let waitForParsedScript (m: System.Threading.ManualResetEvent) (event: Event<ClientEvents>) =
-
-  let bag = new System.Collections.Concurrent.ConcurrentBag<_>()
-
-  event.Publish
+let waitForParsedScript (event: IObservable<ClientEvents>) =
+  event
   |> getDiagnosticsEvents
-  |> Event.filter (fun (uri, diags) ->
+  |> Observable.filter (fun (uri, diags) ->
     let filename = uri.Replace('\\', '/').Split('/') |> Array.last
     filename = "Script.fs")
-  |> Event.add (fun (uri, diags) ->
-    bag.Add((uri, diags))
-    m.Set() |> ignore
-  )
-
-  bag
+  |> Async.AwaitObservable

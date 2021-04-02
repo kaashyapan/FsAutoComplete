@@ -93,9 +93,7 @@ type FSharpLspClient(rpc: JsonRpc) =
   abstract NotifyCancelledRequest: message: string -> Task
   default x.NotifyCancelledRequest(message: string) = rpc.NotifyWithParameterObjectAsync("fsharp/notifyCancel", { Content = message })
 
-type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: bool, state: State) as this =
-
-  let logger = LogProvider.getLoggerByType typeof<FSharpLspServer>
+let configureJsonRpcHandler(inStream: Stream, outStream: Stream) =
   // using a custom formatter so that we can add our own
   // * converters
   // * naming strategy
@@ -103,6 +101,9 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   // this lines up with the serializers used in the prior implementation
   let formatter : IJsonRpcMessageTextFormatter =
     let formatter = new JsonMessageFormatter()
+    formatter.JsonSerializer.Converters
+    |> Seq.tryFind (fun c -> c.GetType() = typeof<Newtonsoft.Json.Converters.DiscriminatedUnionConverter>)
+    |> Option.iter (fun c -> formatter.JsonSerializer.Converters.Remove c |> ignore<bool>)
 
     for converter in LanguageServerProtocol.Server.customConverters do
       formatter.JsonSerializer.Converters.Add converter
@@ -111,8 +112,14 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     formatter.JsonSerializer.ContractResolver <- Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()
     formatter :> _
   // LSP uses a header-delimited message stream, so we use the handler that understands that format
-  let handler = new StreamJsonRpc.HeaderDelimitedMessageHandler(sender, reader, formatter)
-  let rpc = new JsonRpc(handler, this)
+  let handler = new StreamJsonRpc.HeaderDelimitedMessageHandler(outStream, inStream, formatter)
+  handler
+
+type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: bool, state: State) as this =
+  let logger = LogProvider.getLoggerByType typeof<FSharpLspServer>
+  let rpc =
+    let handler = configureJsonRpcHandler (reader, sender)
+    new JsonRpc(handler, this)
   let mutable client = FSharpLspClient(rpc)
 
   let backgroundService : BackgroundServices.BackgroundService =
@@ -585,8 +592,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<RpcMethod("initialize")>]
   member x.Initialize(p: InitializeParams, ctok: CancellationToken) =
     task {
-      logger.info (Log.setMessage "Initialize Request {p}" >> Log.addContextDestructured "p" p)
-
       let actualRootPath =
         match p.RootUri with
         | Some rootUri -> Some(Path.FileUriToLocalPath rootUri)
@@ -813,9 +818,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   member _.WorkspaceDidChangeConfiguration(workspaceSettings: DidChangeConfigurationParams) =
     task {
       let dto = LanguageServerProtocol.Server.deserialize<FSharpConfigRequest> workspaceSettings.Settings
-
-      logger.info (Log.setMessage "WorkspaceDidChangeConfiguration Request: {parms}" >> Log.addContextDestructured "parms" dto)
-
       let c = config.AddDto dto.FSharp
       updateConfig c
       return ()
@@ -828,8 +830,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       let filePath = doc.GetFilePath() |> Utils.normalizePath
       let content = doc.Text.Split('\n')
       let tfmConfig = config.UseSdkScripts
-      logger.info (Log.setMessage "TextDocumentDidOpen Request: {parms}" >> Log.addContextDestructured "parms" filePath)
-
       commands.SetFileContent(filePath, content, Some doc.Version, config.ScriptTFM)
 
       if not commands.IsWorkspaceReady && rootPath.IsSome then
@@ -853,8 +853,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       let filePath = doc.GetFilePath() |> Utils.normalizePath
       let contentChange = p.ContentChanges |> Seq.tryLast
 
-      logger.info (Log.setMessage "TextDocumentDidChange Request: {parms}" >> Log.addContextDestructured "parms" filePath)
-
       match contentChange, doc.Version with
       | Some contentChange, Some version ->
           if contentChange.Range.IsNone && contentChange.RangeLength.IsNone then
@@ -873,8 +871,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<JsonRpcMethodAttribute("fsharp/loadAnalyzers", UseSingleObjectParameterDeserialization = true)>]
   member _.FSharpLoadAnalyzers(path: {| Project: {| Uri: string |} |}) =
     task {
-      logger.info (Log.setMessage "LoadAnalyzers Request: {parms}" >> Log.addContextDestructured "parms" path)
-
       try
         if config.EnableAnalyzers then
           Loggers.analyzers.info (
@@ -914,8 +910,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("textDocument/hover")>]
   member x.TextDocumentHover(p: TextDocumentPositionParams, ctok: CancellationToken) : Task<Hover option> =
-    logger.info (Log.setMessage "TextDocumentHover Request: {parms}" >> Log.addContextDestructured "parms" p)
-
     p
     |> x.positionHandler
          (fun p pos tyRes lineStr lines ->
@@ -976,8 +970,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
         raise (AsyncLspResult.internalError "not ok")
 
     task {
-      logger.info (Log.setMessage "TextDocumentCompletion Request: {context}" >> Log.addContextDestructured "context" p)
-      // Sublime-lsp doesn't like when we answer null so we answer an empty list instead
       let file = p.TextDocument.GetFilePath() |> Utils.normalizePath
       let pos = p.GetFcsPos()
 
@@ -1040,6 +1032,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
             let completionList = { IsIncomplete = false; Items = its }
             return Some completionList
         | _ ->
+            // Sublime-lsp doesn't like when we answer null so we answer an empty list instead
             logger.info (Log.setMessage "TextDocumentCompletion - no completion results")
             return Some { IsIncomplete = true; Items = [||] }
     }
@@ -1047,8 +1040,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<RpcMethod("completionItem/resolve")>]
   member x.CompletionItemResolve(ci: CompletionItem, ctok) =
     task {
-      logger.info (Log.setMessage "CompletionItemResolve Request: {parms}" >> Log.addContextDestructured "parms" ci)
-
       let! res = commands.Helptext ci.InsertText.Value |> Async.startTaskWithCancel ctok
 
       let res =
@@ -1075,8 +1066,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("textDocument/rename")>]
   member x.TextDocumentRename(p: RenameParams, ctok) =
-    logger.info (Log.setMessage "TextDocumentRename Request: {parms}" >> Log.addContextDestructured "parms" p)
-
     p
     |> x.positionHandler
          (fun p pos tyRes lineStr lines ->
@@ -1148,8 +1137,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("textDocument/signatureHelp")>]
   member x.TextDocumentSignatureHelp(sigHelpParams: SignatureHelpParams, ctok: CancellationToken) =
-    logger.info (Log.setMessage "TextDocumentSignatureHelp Request: {parms}" >> Log.addContextDestructured "parms" sigHelpParams)
-
     sigHelpParams
     |> x.positionHandlerWithLatest
          (fun p fcsPos tyRes lineStr lines ->
@@ -1187,8 +1174,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("textDocument/definition")>]
   member x.TextDocumentDefinition(p: TextDocumentPositionParams, ctok: CancellationToken) =
-    logger.info (Log.setMessage "TextDocumentDefinition Request: {parms}" >> Log.addContextDestructured "parms" p)
-
     p
     |> x.positionHandler
          (fun p pos tyRes lineStr lines ->
@@ -1200,8 +1185,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("textDocument/typeDefinition")>]
   member x.TextDocumentTypeDefinition(p: TextDocumentPositionParams, ctok: CancellationToken) =
-    logger.info (Log.setMessage "TextDocumentTypeDefinition Request: {parms}" >> Log.addContextDestructured "parms" p)
-
     p
     |> x.positionHandler
          (fun p pos tyRes lineStr lines ->
@@ -1213,8 +1196,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("textDocument/references")>]
   member x.TextDocumentReferences(p: ReferenceParams, ctok: CancellationToken) =
-    logger.info (Log.setMessage "TextDocumentReferences Request: {parms}" >> Log.addContextDestructured "parms" p)
-
     p
     |> x.positionHandler
          (fun p pos tyRes lineStr lines ->
@@ -1233,8 +1214,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("textDocument/documentHighlight")>]
   member x.TextDocumentDocumentHighlight(p: TextDocumentPositionParams, ctok: CancellationToken) =
-    logger.info (Log.setMessage "TextDocumentDocumentHighlight Request: {parms}" >> Log.addContextDestructured "parms" p)
-
     p
     |> x.positionHandler
          (fun p pos tyRes lineStr lines ->
@@ -1247,8 +1226,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("textDocument/implementation")>]
   member x.TextDocumentImplementation(p: TextDocumentPositionParams, ctok: CancellationToken) =
-    logger.info (Log.setMessage "TextDocumentImplementation Request: {parms}" >> Log.addContextDestructured "parms" p)
-
     p
     |> x.positionHandler
          (fun p pos tyRes lineStr lines ->
@@ -1265,7 +1242,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<RpcMethod("textDocument/documentSymbol")>]
   member x.TextDocumentDocumentSymbol(p: DocumentSymbolParams, ctok: CancellationToken) =
     task {
-      logger.info (Log.setMessage "TextDocumentDocumentSymbol Request: {parms}" >> Log.addContextDestructured "parms" p)
       let fn = p.TextDocument.GetFilePath() |> Utils.normalizePath
 
       let! decls =
@@ -1283,8 +1259,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<RpcMethod("workspace/symbol")>]
   member x.WorkspaceSymbol(symbolRequest: WorkspaceSymbolParams, ctok: CancellationToken) =
     task {
-      logger.info (Log.setMessage "WorkspaceSymbol Request: {parms}" >> Log.addContextDestructured "parms" symbolRequest)
-
       let! decls = commands.DeclarationsInProjects() |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
 
       let symbols =
@@ -1300,7 +1274,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<RpcMethod("textDocument/formatting")>]
   member x.TextDocumentFormatting(p: DocumentFormattingParams, ctok: CancellationToken) =
     task {
-      logger.info (Log.setMessage "TextDocumentFormatting Request: {parms}" >> Log.addContextDestructured "parms" p)
       let doc = p.TextDocument
       let fileName = doc.GetFilePath() |> Utils.normalizePath
       let! res = commands.FormatDocument fileName |> Async.startTaskWithCancel ctok
@@ -1320,8 +1293,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<RpcMethod("textDocument/codeAction")>]
   member x.TextDocumentCodeAction(codeActionParams: CodeActionParams, ctok: CancellationToken) =
     task {
-      logger.info (Log.setMessage "TextDocumentCodeAction Request: {parms}" >> Log.addContextDestructured "parms" codeActionParams)
-
       let fn = codeActionParams.TextDocument.GetFilePath() |> Utils.normalizePath
 
       match commands.TryGetFileCheckerOptionsWithLines fn with
@@ -1337,8 +1308,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<RpcMethod("textDocument/codeLens")>]
   member __.TextDocumentCodeLens(p: CodeLensParams, ctok: CancellationToken) =
     task {
-      logger.info (Log.setMessage "TextDocumentCodeLens Request: {parms}" >> Log.addContextDestructured "parms" p)
-
       let fn = p.TextDocument.GetFilePath() |> Utils.normalizePath
 
       let! decls =
@@ -1362,8 +1331,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("codeLens/resolve")>]
   member x.CodeLensResolve(p: CodeLens, ctok: CancellationToken) =
-    logger.info (Log.setMessage "CodeLensResolve Request: {parms}" >> Log.addContextDestructured "parms" p)
-
     let handler f (arg: CodeLens) =
       async {
         let pos = FcsPos.mkPos (arg.Range.Start.Line + 1) (arg.Range.Start.Character + 2)
@@ -1486,8 +1453,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<RpcMethod("workspace/didChangeWatchedFiles")>]
   member x.WorkspaceDidChangeWatchedFiles(p: DidChangeWatchedFilesParams, ctok: CancellationToken) =
     task {
-      logger.info (Log.setMessage "WorkspaceDidChangeWatchedFiles Request: {parms}" >> Log.addContextDestructured "parms" p)
-
       p.Changes
       |> Array.iter
            (fun c ->
@@ -1509,8 +1474,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   member __.WorkspaceDidChangeConfiguration(p: DidChangeConfigurationParams, ctok: CancellationToken) =
     task {
       let dto = p.Settings |> LanguageServerProtocol.Server.deserialize<FSharpConfigRequest>
-      logger.info (Log.setMessage "WorkspaceDidChangeConfiguration Request: {parms}" >> Log.addContextDestructured "parms" dto)
-
       let c = config.AddDto dto.FSharp
       updateConfig c
       logger.info (Log.setMessage "Workspace configuration changed" >> Log.addContextDestructured "config" c)
@@ -1520,7 +1483,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<RpcMethod("textDocument/foldingRange")>]
   member x.TextDocumentFoldingRange(rangeP: FoldingRangeParams, ctok: CancellationToken) =
     task {
-      logger.info (Log.setMessage "TextDocumentFoldingRange Request: {parms}" >> Log.addContextDestructured "parms" rangeP)
       let file = rangeP.TextDocument.GetFilePath() |> Utils.normalizePath
 
       match! commands.ScopesForFile file |> Async.startTaskWithCancel ctok with
@@ -1533,8 +1495,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<RpcMethod("textDocument/selectionRange")>]
   member __.TextDocumentSelectionRange(selectionRangeP: SelectionRangeParams, ctok: CancellationToken) =
     task {
-      logger.info (Log.setMessage "TextDocumentSelectionRange Request: {parms}" >> Log.addContextDestructured "parms" selectionRangeP)
-
       let rec mkSelectionRanges =
         function
         | [] -> None
@@ -1549,8 +1509,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("fsharp/signature")>]
   member x.FSharpSignature(p: TextDocumentPositionParams, ctok) =
-    logger.info (Log.setMessage "FSharpSignature Request: {parms}" >> Log.addContextDestructured "parms" p)
-
     p
     |> x.positionHandler
          (fun p pos tyRes lineStr lines ->
@@ -1560,18 +1518,10 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("fsharp/signatureData")>]
   member x.FSharpSignatureData(p: TextDocumentPositionParams, ctok) =
-    logger.info (Log.setMessage "FSharpSignatureData Request: {parms}" >> Log.addContextDestructured "parms" p)
-
     let handler f (arg: TextDocumentPositionParams) =
       async {
         let pos = FcsPos.mkPos (p.Position.Line) (p.Position.Character + 2)
         let file = p.TextDocument.GetFilePath() |> Utils.normalizePath
-
-        logger.info (
-          Log.setMessage "FSharpSignatureData - Position request for {file} at {pos}"
-          >> Log.addContextDestructured "file" file
-          >> Log.addContextDestructured "pos" pos
-        )
 
         return!
           match commands.TryGetFileCheckerOptionsWithLinesAndLineStr(file, pos) with
@@ -1834,14 +1784,12 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("textDocument/semanticTokens/full")>]
   member x.TextDocumentSemanticTokensFull(p: SemanticTokensParams, ctok) : Task<SemanticTokens option> =
-    logger.info (Log.setMessage "Semantic highlighing request: {parms}" >> Log.addContextDestructured "parms" p)
     let fn = p.TextDocument.GetFilePath() |> Utils.normalizePath
     let getTokens = commands.GetHighlighting(fn, None) |> AsyncResult.ofCoreResponse
     x.handleSemanticTokens (getTokens) |> Async.startTaskWithCancel ctok
 
   [<RpcMethod("textDocument/semanticTokens/range")>]
   member x.TextDocumentSemanticTokensRange(p: SemanticTokensRangeParams, ctok) : Task<SemanticTokens option> =
-    logger.info (Log.setMessage "Semantic highlighing range request: {parms}" >> Log.addContextDestructured "parms" p)
     let fn = p.TextDocument.GetFilePath() |> Utils.normalizePath
     let fcsRange = protocolRangeToRange (UMX.untag fn) p.Range
     let getTokens = commands.GetHighlighting(fn, Some fcsRange) |> AsyncResult.ofCoreResponse
@@ -1850,7 +1798,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   [<RpcMethod("fsharp/fsharpLiterate")>]
   member x.FSharpFSharpLiterate(p: FSharpLiterateRequest, ctok) =
     task {
-      logger.info (Log.setMessage "FSharpLiterate Request: {parms}" >> Log.addContextDestructured "parms" p)
       let fn = p.FileName |> Utils.normalizePath
       let! res = commands.FSharpLiterate fn |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
       return { Content = CommandResponse.fsharpLiterate FsAutoComplete.JsonSerializer.writeJson res }
@@ -1858,7 +1805,6 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
 
   [<RpcMethod("fsharp/pipelineHints")>]
   member x.FSharpPipelineHints(p: FSharpPipelineHintRequest, ctok) =
-    logger.info (Log.setMessage "FSharpPipelineHints Request: {parms}" >> Log.addContextDestructured "parms" p)
     let fn = p.FileName |> Utils.normalizePath
 
     fn

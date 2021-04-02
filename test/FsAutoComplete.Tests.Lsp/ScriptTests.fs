@@ -14,7 +14,7 @@ let scriptPreviewTests toolsPath workspaceLoaderFactory =
     let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "PreviewScriptFeatures")
     let scriptPath = Path.Combine(path, "Script.fsx")
     let (server, events) = serverInitialize path { defaultConfigDto with FSIExtraParameters = Some [| "--langversion:preview" |] } toolsPath workspaceLoaderFactory
-    do waitForWorkspaceFinishedParsing events
+    do waitForWorkspaceFinishedParsing events |> Async.RunSynchronously
     server, events, scriptPath
   )
   let serverTest f () = f serverStart.Value
@@ -35,7 +35,7 @@ let scriptEvictionTests toolsPath workspaceLoaderFactory =
     let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "PreviewScriptFeatures")
     let scriptPath = Path.Combine(path, "Script.fsx")
     let (server, events) = serverInitialize path defaultConfigDto toolsPath workspaceLoaderFactory
-    do waitForWorkspaceFinishedParsing events
+    do waitForWorkspaceFinishedParsing events |> Async.RunSynchronously
     server, events, scriptPath
   )
   let serverTest f () = f serverStart.Value
@@ -76,7 +76,7 @@ let dependencyManagerTests toolsPath workspaceLoaderFactory =
       { defaultConfigDto with
           FSIExtraParameters = Some [| "--langversion:preview" |] }
     let (server, events) = serverInitialize workingDir dependencyManagerEnabledConfig toolsPath workspaceLoaderFactory
-    do waitForWorkspaceFinishedParsing events
+    do waitForWorkspaceFinishedParsing events |> Async.RunSynchronously
     server, events, workingDir
   )
 
@@ -113,7 +113,7 @@ let scriptGotoTests toolsPath workspaceLoaderFactory =
     let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "GoToTests")
 
     let (server, event) = serverInitialize path defaultConfigDto toolsPath workspaceLoaderFactory
-    do waitForWorkspaceFinishedParsing event
+    do waitForWorkspaceFinishedParsing event |> Async.RunSynchronously
 
     let scriptPath = Path.Combine(path, "Script.fsx")
     let tdop : DidOpenTextDocumentParams = { TextDocument = loadDocument scriptPath }
