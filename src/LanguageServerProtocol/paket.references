@@ -1,5 +1,6 @@
 Newtonsoft.Json
 FSharp.Core
 Microsoft.SourceLink.GitHub
+StreamJsonRpc
 
 Microsoft.NETFramework.ReferenceAssemblies

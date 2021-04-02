@@ -15,7 +15,7 @@ Fantomas
 Fantomas.Extras
 FSharp.UMX
 FsToolkit.ErrorHandling
-
+StreamJsonRpc
 System.Reflection.Metadata
 FSharp.Formatting
 Microsoft.Build.Utilities.Core

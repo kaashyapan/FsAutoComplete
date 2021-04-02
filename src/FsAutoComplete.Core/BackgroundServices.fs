@@ -6,6 +6,8 @@ open System.IO
 open FSharp.Compiler.SourceCodeServices
 open Ionide.ProjInfo.ProjectSystem
 open FsAutoComplete.Logging
+open StreamJsonRpc
+open System.Threading.Tasks
 
 let logger =
   LogProvider.getLoggerByName "Background Service"
@@ -45,6 +47,29 @@ let pid =
 
 type MessageType = Diagnostics of Types.PublishDiagnosticsParams
 
+type BackgroundServiceClient(exe, args) =
+  inherit Client(exe, args)
+
+  let messageRecieved = Event<MessageType>()
+
+  member x.UpdateFile(msg: UpdateFileParms) =
+    x.Rpc.NotifyWithParameterObjectAsync ("background/update", msg)
+
+  member x.UpdateProject (msg: ProjectParms) =
+    x.Rpc.NotifyWithParameterObjectAsync ("background/project", msg)
+
+  member x.SaveFile (msg: FileParms) =
+    x.Rpc.NotifyWithParameterObjectAsync("background/save", msg)
+
+  [<JsonRpcMethod("background/notify")>]
+  member x.Notify(msg: string)  =
+    logger.info (Log.setMessage "Background service message {msg}" >> Log.addContextDestructured "msg" msg)
+
+  [<JsonRpcMethod("background/diagnostics", UseSingleObjectParameterDeserialization = true)>]
+  member x.Diagnostics(msg: Types.PublishDiagnosticsParams)  =
+    messageRecieved.Trigger (Diagnostics msg)
+
+  member x.MessageReceived = messageRecieved.Publish
 type BackgroundService =
   abstract UpdateFile : BackgroundFileCheckType * string * int -> unit
   abstract UpdateProject : string * FSharpProjectOptions -> unit
@@ -55,40 +80,9 @@ type BackgroundService =
   abstract GetImplementation: string -> Async<option<SymbolCache.SymbolUseRange array>>
 
 type ActualBackgroundService() =
-  let messageRecieved = Event<MessageType>()
 
-  let client =
 
-    let notificationsHandler =
-      Map.empty
-      |> Map.add
-           "background/notify"
-           (Client.notificationHandling
-             (fun (msg: Msg) ->
-               async {
-                 logger.info (
-                   Log.setMessage "Background service message {msg}"
-                   >> Log.addContextDestructured "msg" msg
-                 )
-
-                 return None
-               }))
-      |> Map.add
-           "background/diagnostics"
-           (Client.notificationHandling
-             (fun (msg: Types.PublishDiagnosticsParams) ->
-               async {
-                 messageRecieved.Trigger(Diagnostics msg)
-                 return None
-               }))
-
-    Client.Client(
-      "dotnet",
-      Path.Combine(p, "fsautocomplete.backgroundservices.dll")
-      + " "
-      + pid,
-      notificationsHandler
-    )
+  let client = BackgroundServiceClient("dotnet", Path.Combine(p, "fsautocomplete.backgroundservices.dll") + " " + pid)
 
   interface BackgroundService with
     member x.Start (workspaceDir) =
@@ -101,17 +95,17 @@ type ActualBackgroundService() =
           Content = content
           Version = version }
 
-      client.SendNotification "background/update" msg
+      client.UpdateFile msg |> ignore<Task>
 
     member x.UpdateProject(file, opts) =
       let msg = { File = file; Options = opts }
-      client.SendNotification "background/project" msg
+      client.UpdateProject msg |> ignore<Task>
 
     member x.SaveFile(file) =
       let msg : FileParms = { File = file }
-      client.SendNotification "background/save" msg
+      client.SaveFile msg |> ignore<Task>
 
-    member x.MessageReceived = messageRecieved.Publish
+    member x.MessageReceived = client.MessageReceived
 
     member x.GetSymbols symbolName =
       SymbolCache.getSymbols symbolName
