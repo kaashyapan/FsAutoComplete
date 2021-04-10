@@ -76,7 +76,7 @@ type FSharpLspClient(rpc: JsonRpc) =
 
   abstract NotifyFileParsed: localPath : string<LocalPath> -> Task
   default x.NotifyFileParsed(localPath: string<LocalPath>) =
-    rpc.NotifyWithParameterObjectAsync("fsharp/fileParsed", { Content = UMX.untag localPath })
+    rpc.NotifyWithParameterObjectAsync("fsharp/fileParsed", { content = UMX.untag localPath })
 
   abstract NotifyWorkspace: project: ProjectResponse -> Task
   default x.NotifyWorkspace(project: ProjectResponse) =
@@ -88,10 +88,10 @@ type FSharpLspClient(rpc: JsonRpc) =
       | ProjectResponse.WorkspaceLoad (finished) -> CommandResponse.workspaceLoad JsonSerializer.writeJson finished
       | ProjectResponse.ProjectChanged (projectFileName) -> failwith "Not Implemented"
 
-    rpc.NotifyWithParameterObjectAsync("fsharp/notifyWorkspace", { Content = payload })
+    rpc.NotifyWithParameterObjectAsync("fsharp/notifyWorkspace", { content = payload })
 
   abstract NotifyCancelledRequest: message: string -> Task
-  default x.NotifyCancelledRequest(message: string) = rpc.NotifyWithParameterObjectAsync("fsharp/notifyCancel", { Content = message })
+  default x.NotifyCancelledRequest(message: string) = rpc.NotifyWithParameterObjectAsync("fsharp/notifyCancel", { content = message })
 
 let configureJsonRpcHandler(inStream: Stream, outStream: Stream) =
   // using a custom formatter so that we can add our own
@@ -129,13 +129,11 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       BackgroundServices.MockBackgroundService() :> _
 
   let mutable commands = new Commands(FSharpCompilerServiceChecker(backgroundServiceEnabled, false), state, backgroundService, false)
-
   let mutable commandDisposables = ResizeArray()
 
   let mutable clientCapabilities : ClientCapabilities option = None
   let mutable glyphToCompletionKind = LspHelpers.GlyphConversions.glyphToCompletionKindGenerator None
   let mutable glyphToSymbolKind = LspHelpers.GlyphConversions.glyphToSymbolKindGenerator None
-  let subscriptions = ResizeArray<IDisposable>()
 
   let mutable config = LspHelpers.FSharpConfig.Default
   let mutable rootPath : string option = None
@@ -438,16 +436,12 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   do
     // hook up request/response logging for debugging
     rpc.TraceSource <- new TraceSource(typeof<FSharpLspServer>.Name, SourceLevels.Verbose)
-
     rpc.TraceSource.Listeners.Add(new SerilogTraceListener.SerilogTraceListener(typeof<FSharpLspServer>.Name))
     |> ignore<int>
     // start the pipes flowing
     rpc.StartListening()
 
     commandDisposables.Add <| commands.Notify.Subscribe handleCommandEvents
-
-  /// provides access to the underlying RPC client representing the hosting application for this LSP server instance
-  member val Client = client with get, set
 
   /// returns a hot task that resolves when the stream has terminated
   member x.WaitForClose = rpc.Completion
@@ -796,7 +790,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
       let found = commands.WorkspacePeek p.Directory p.Deep (p.ExcludedDirs |> List.ofArray)
       let mapped = Mapping.mapWorkspacePeek found
       let serialized = JsonSerializer.writeJson mapped
-      return { PlainNotification.Content = serialized }
+      return { PlainNotification.content = serialized }
     }
 
   [<RpcMethod("fsharp/workspaceLoad")>]
@@ -808,7 +802,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
         commands.WorkspaceLoad fns config.DisableInMemoryProjectReferences config.ScriptTFM config.GenerateBinlog
         |> Async.startTaskWithCancel ctok
 
-      return { Content = CommandResponse.workspaceLoad FsAutoComplete.JsonSerializer.writeJson fin }
+      return { content = CommandResponse.workspaceLoad FsAutoComplete.JsonSerializer.writeJson fin }
     }
 
   [<JsonRpcMethod("initialized")>]
@@ -1513,7 +1507,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     |> x.positionHandler
          (fun p pos tyRes lineStr lines ->
            let tip = commands.Typesig tyRes pos lineStr |> CoreResponse.toRpcError
-           { Content = CommandResponse.typeSig FsAutoComplete.JsonSerializer.writeJson tip } |> async.Return)
+           { content = CommandResponse.typeSig FsAutoComplete.JsonSerializer.writeJson tip } |> async.Return)
     |> Async.startTaskWithCancel ctok
 
   [<RpcMethod("fsharp/signatureData")>]
@@ -1551,7 +1545,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
          (fun p pos tyRes lineStr ->
            let (typ, parms, generics) = commands.SignatureData tyRes pos lineStr |> CoreResponse.toRpcError
 
-           { Content = CommandResponse.signatureData FsAutoComplete.JsonSerializer.writeJson (typ, parms, generics) }
+           { content = CommandResponse.signatureData FsAutoComplete.JsonSerializer.writeJson (typ, parms, generics) }
            |> async.Return)
     |> Async.startTaskWithCancel ctok
 
@@ -1562,7 +1556,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
          (fun p pos tyRes lineStr lines ->
            let (typ, parms, generics) = commands.SignatureData tyRes pos lineStr |> CoreResponse.toRpcError
 
-           { Content = CommandResponse.signatureData FsAutoComplete.JsonSerializer.writeJson (typ, parms, generics) }
+           { content = CommandResponse.signatureData FsAutoComplete.JsonSerializer.writeJson (typ, parms, generics) }
            |> async.Return)
     |> Async.startTaskWithCancel ctok
 
@@ -1576,7 +1570,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
         |> AsyncResult.ofCoreResponse
         |> Async.startTaskWithCancel ctok
 
-      return { Content = CommandResponse.declarations FsAutoComplete.JsonSerializer.writeJson decls }
+      return { content = CommandResponse.declarations FsAutoComplete.JsonSerializer.writeJson decls }
     }
 
   [<RpcMethod("lineLens/resolve")>]
@@ -1586,7 +1580,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
          (fun p pos tyRes lineStr lines ->
            let (typ, parms, generics) = commands.SignatureData tyRes pos lineStr |> CoreResponse.toRpcError
 
-           { Content = CommandResponse.signatureData FsAutoComplete.JsonSerializer.writeJson (typ, parms, generics) }
+           { content = CommandResponse.signatureData FsAutoComplete.JsonSerializer.writeJson (typ, parms, generics) }
            |> async.Return)
     |> Async.startTaskWithCancel ctok
 
@@ -1594,7 +1588,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
   member x.FSharpCompilerLocation() =
     let (fsc, fsi, msbuild, sdk) = commands.CompilerLocation() |> CoreResponse.toRpcError
 
-    { Content =
+    { content =
         CommandResponse.compilerLocation
           FsAutoComplete.JsonSerializer.writeJson
           fsc
@@ -1607,56 +1601,56 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     task {
       let fn = p.Project.GetFilePath()
       let! fin = commands.Project fn config.GenerateBinlog |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
-      return { Content = CommandResponse.projectLoad FsAutoComplete.JsonSerializer.writeJson fin }
+      return { content = CommandResponse.projectLoad FsAutoComplete.JsonSerializer.writeJson fin }
     }
 
   [<RpcMethod("fsharp/dotnetNewList")>]
   member x.FSharpDotnetNewList(p: DotnetNewListRequest, ctok) =
     task {
       let! funcs = commands.DotnetNewList() |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
-      return { Content = CommandResponse.dotnetnewlist FsAutoComplete.JsonSerializer.writeJson funcs }
+      return { content = CommandResponse.dotnetnewlist FsAutoComplete.JsonSerializer.writeJson funcs }
     }
 
   [<RpcMethod("fsharp/dotnetNewRun")>]
   member x.FSharpDotnetNewRun(p: DotnetNewRunRequest, ctok) =
     task {
       let! _ = commands.DotnetNewRun p.Template p.Name p.Output [] |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
-      return { Content = "" }
+      return { content = "" }
     }
 
   [<RpcMethod("fsharp/dotnetAddProject")>]
   member x.FSharpDotnetAddProject(p: DotnetProjectRequest, ctok) =
     task {
       let! _ = commands.DotnetAddProject p.Target p.Reference |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
-      return { Content = "" }
+      return { content = "" }
     }
 
   [<RpcMethod("fsharp/dotnetRemoveProject")>]
   member x.FSharpDotnetRemoveProject(p: DotnetProjectRequest, ctok) =
     task {
       let! _ = commands.DotnetRemoveProject p.Target p.Reference |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
-      return { Content = "" }
+      return { content = "" }
     }
 
   [<RpcMethod("fsharp/dotnetSlnAdd")>]
   member x.FSharpDotnetSlnAdd(p: DotnetProjectRequest, ctok) =
     task {
       let! _ = commands.DotnetSlnAdd p.Target p.Reference |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
-      return { Content = "" }
+      return { content = "" }
     }
 
   [<RpcMethod("fsproj/moveFileUp")>]
   member x.FsprojMoveFileUp(p: DotnetFileRequest, ctok) =
     task {
       let! _ = commands.FsProjMoveFileUp p.FsProj p.FileVirtualPath |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
-      return { Content = "" }
+      return { content = "" }
     }
 
   [<RpcMethod("fsproj/moveFileDown")>]
   member x.FsprojMoveFileDown(p: DotnetFileRequest, ctok) =
     task {
       let! _ = commands.FsProjMoveFileDown p.FsProj p.FileVirtualPath |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
-      return { Content = "" }
+      return { content = "" }
     }
 
   [<RpcMethod("fsproj/addFileAbove")>]
@@ -1667,7 +1661,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
         |> AsyncResult.ofCoreResponse
         |> Async.startTaskWithCancel ctok
 
-      return { Content = "" }
+      return { content = "" }
     }
 
   [<RpcMethod("fsproj/addFileBelow")>]
@@ -1678,14 +1672,14 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
         |> AsyncResult.ofCoreResponse
         |> Async.startTaskWithCancel ctok
 
-      return { Content = "" }
+      return { content = "" }
     }
 
   [<RpcMethod("fsproj/addFile")>]
   member x.FsprojAddFile(p: DotnetFileRequest, ctok) =
     task {
       let! _ = commands.FsProjAddFile p.FsProj p.FileVirtualPath |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
-      return { Content = "" }
+      return { content = "" }
     }
 
   [<RpcMethod("fsharp/help")>]
@@ -1694,7 +1688,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     |> x.positionHandler
          (fun p pos tyRes lineStr lines ->
            let t = commands.Help tyRes pos lineStr |> CoreResponse.toRpcError
-           { Content = CommandResponse.help FsAutoComplete.JsonSerializer.writeJson t } |> async.Return)
+           { content = CommandResponse.help FsAutoComplete.JsonSerializer.writeJson t } |> async.Return)
     |> Async.startTaskWithCancel ctok
 
   [<RpcMethod("fsharp/documentation")>]
@@ -1704,7 +1698,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
          (fun p pos tyRes lineStr lines ->
            let (tip, xml, signature, footer, cm) = commands.FormattedDocumentation tyRes pos lineStr |> CoreResponse.toRpcError
 
-           { Content = CommandResponse.formattedDocumentation FsAutoComplete.JsonSerializer.writeJson (tip, xml, signature, footer, cm) }
+           { content = CommandResponse.formattedDocumentation FsAutoComplete.JsonSerializer.writeJson (tip, xml, signature, footer, cm) }
            |> async.Return)
     |> Async.startTaskWithCancel ctok
 
@@ -1716,7 +1710,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
         let (xml, assembly, doc, signature, footer, cn) =
           commands.FormattedDocumentationForSymbol tyRes p.XmlSig p.Assembly |> Result.ofCoreResponse
 
-        { Content =
+        { content =
             CommandResponse.formattedDocumentationForSymbol FsAutoComplete.JsonSerializer.writeJson xml assembly doc (signature, footer, cn) }
         |> async.Return
 
@@ -1800,7 +1794,7 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     task {
       let fn = p.FileName |> Utils.normalizePath
       let! res = commands.FSharpLiterate fn |> AsyncResult.ofCoreResponse |> Async.startTaskWithCancel ctok
-      return { Content = CommandResponse.fsharpLiterate FsAutoComplete.JsonSerializer.writeJson res }
+      return { content = CommandResponse.fsharpLiterate FsAutoComplete.JsonSerializer.writeJson res }
     }
 
   [<RpcMethod("fsharp/pipelineHints")>]
@@ -1811,5 +1805,5 @@ type FSharpLspServer(sender: Stream, reader: Stream, backgroundServiceEnabled: b
     |> x.fileHandler
          (fun fn tyRes lines ->
            let res = commands.PipelineHints tyRes |> CoreResponse.toRpcError
-           { Content = CommandResponse.pipelineHint FsAutoComplete.JsonSerializer.writeJson res } |> async.Return)
+           { content = CommandResponse.pipelineHint FsAutoComplete.JsonSerializer.writeJson res } |> async.Return)
     |> Async.startTaskWithCancel ctok

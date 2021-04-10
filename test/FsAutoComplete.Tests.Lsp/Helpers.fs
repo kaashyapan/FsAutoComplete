@@ -119,7 +119,7 @@ type ClientEvents =
 | ProjectLoaded of CommandResponse.ProjectResponse
 | ProjectLoadError of CommandResponse.ResponseError<obj>
 
-let (| Response |) ({ Content = payload}): 't =
+let (| Response |) ({ content = payload}): 't =
   let response: CommandResponse.ResponseMsg<'t> = JsonSerializer.readJson payload
   response.Data
 
@@ -134,11 +134,11 @@ type TestNotificationClient() =
     clientEvents.OnNext (ClientEvents.Diagnostics(p.Uri, p.Diagnostics))
 
   [<JsonRpcMethod("fsharp/fileParsed", UseSingleObjectParameterDeserialization = true)>]
-  member x.NotifyFileParsed({ Content = localPath} ) =
+  member x.NotifyFileParsed({ content = localPath} ) =
     clientEvents.OnNext (ClientEvents.FileParsed (UMX.tag localPath))
 
   [<JsonRpcMethod("fsharp/notifyWorkspace", UseSingleObjectParameterDeserialization = true)>]
-  member x.NotifyWorkspace({ Content = payload }) =
+  member x.NotifyWorkspace({ content = payload }) =
     let t : CommandResponse.ResponseMsg<JToken> = JsonSerializer.readJson payload
     match t.Kind with
     | "workspaceLoad" -> t.Data.ToObject<CommandResponse.WorkspaceLoadResponse>() |> ClientEvents.WorkspaceLoad |> Some

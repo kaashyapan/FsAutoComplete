@@ -515,7 +515,8 @@ module ClassificationUtils =
       | SemanticClassificationType.LocalValue -> SemanticTokenTypes.Variable, []
       | SemanticClassificationType.Plaintext -> SemanticTokenTypes.Text, []
 
-type PlainNotification= { Content: string }
+[<System.Diagnostics.DebuggerDisplay("{Content}")>]
+type PlainNotification = { content: string }
 
 type ProjectParms = {
     /// Project file to compile

@@ -80,8 +80,6 @@ type BackgroundService =
   abstract GetImplementation: string -> Async<option<SymbolCache.SymbolUseRange array>>
 
 type ActualBackgroundService() =
-
-
   let client = BackgroundServiceClient("dotnet", Path.Combine(p, "fsautocomplete.backgroundservices.dll") + " " + pid)
 
   interface BackgroundService with

@@ -263,10 +263,13 @@ type Commands (checker: FSharpCompilerServiceChecker, state: State, backgroundSe
                 match sourceOpt with
                 | None -> ()
                 | Some source ->
-                    let opts = state.GetProjectOptions' file |> Utils.projectOptionsToParseOptions
                     async {
-                      let! parseRes = checker.ParseFile(file, source |> String.concat "\n", opts)
-                      fileParsed.Trigger parseRes
+                      let opts = state.GetProjectOptions file |> Option.map Utils.projectOptionsToParseOptions
+                      match opts with
+                      | None -> return ()
+                      | Some opts ->
+                        let! parseRes = checker.ParseFile(file, source |> String.concat "\n", opts)
+                        fileParsed.Trigger parseRes
                     }
                     |> Async.Start
             with
@@ -746,9 +749,11 @@ type Commands (checker: FSharpCompilerServiceChecker, state: State, backgroundSe
               match! backgroundService.GetSymbols fsym.FullName with
               | None ->
                   if fsym.IsInternalToProject then
-                      let opts = state.GetProjectOptions' tyRes.FileName
-                      let! symbols = checker.GetUsesOfSymbol (tyRes.FileName, [UMX.untag tyRes.FileName, opts] , sym.Symbol)
-                      return CoreResponse.Res (LocationResponse.Use (sym, symbols))
+                      match state.GetProjectOptions tyRes.FileName with
+                      | None -> return CoreResponse.ErrorRes "No project options"
+                      | Some opts ->
+                        let! symbols = checker.GetUsesOfSymbol (tyRes.FileName, [UMX.untag tyRes.FileName, opts] , sym.Symbol)
+                        return CoreResponse.Res (LocationResponse.Use (sym, symbols))
                   else
                       let! symbols = checker.GetUsesOfSymbol (tyRes.FileName, state.FSharpProjectOptions, sym.Symbol)
                       return CoreResponse.Res (LocationResponse.Use (sym, symbols))
@@ -772,9 +777,11 @@ type Commands (checker: FSharpCompilerServiceChecker, state: State, backgroundSe
                 match! backgroundService.GetImplementation fsym.FullName with
                 | None ->
                     if fsym.IsInternalToProject then
-                        let opts = state.GetProjectOptions' tyRes.FileName
+                      match state.GetProjectOptions tyRes.FileName with
+                      | None -> return CoreResponse.ErrorRes "No project options"
+                      | Some opts ->
                         let! symbols = checker.GetUsesOfSymbol (tyRes.FileName, [UMX.untag tyRes.FileName, opts] , sym.Symbol)
-                        return CoreResponse.Res (LocationResponse.Use (sym, filterSymbols symbols ))
+                        return CoreResponse.Res (LocationResponse.Use (sym, symbols))
                     else
                         let! symbols = checker.GetUsesOfSymbol (tyRes.FileName, state.FSharpProjectOptions, sym.Symbol)
                         let symbols = filterSymbols symbols

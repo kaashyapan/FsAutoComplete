@@ -2275,6 +2275,10 @@ type Client(exec: string, args: string) as this =
         rpc <-
           let handler = RpcConfig.configureJsonRpcHandler (writeStream, readStream)
           new JsonRpc(handler, this)
+        // hook up request/response logging for debugging
+        rpc.TraceSource <- new TraceSource(typeof<Client>.Name, SourceLevels.Verbose)
+        rpc.TraceSource.Listeners.Add(new SerilogTraceListener.SerilogTraceListener(typeof<Client>.Name)) |> ignore<int>
+
         rpc.StartListening()
 
         return ()

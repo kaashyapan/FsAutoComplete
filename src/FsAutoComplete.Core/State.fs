@@ -56,9 +56,6 @@ type State =
   member x.GetProjectOptions(file: string<LocalPath>) : FSharpProjectOptions option =
     x.ProjectController.GetProjectOptions (UMX.untag file)
 
-  member x.GetProjectOptions'(file: string<LocalPath>) : FSharpProjectOptions =
-    (x.ProjectController.GetProjectOptions (UMX.untag file)).Value
-
   member x.RemoveProjectOptions(file: string<LocalPath>) : unit =
     x.ProjectController.RemoveProjectOptions (UMX.untag file)
 

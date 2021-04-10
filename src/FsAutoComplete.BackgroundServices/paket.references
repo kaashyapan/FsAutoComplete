@@ -10,3 +10,8 @@ Ionide.ProjInfo.ProjectSystem
 FSharp.UMX
 Microsoft.NETFramework.ReferenceAssemblies
 StreamJsonRpc
+Serilog
+Serilog.Sinks.File
+Serilog.Sinks.Console
+Serilog.Sinks.Async
+Destructurama.FSharp
