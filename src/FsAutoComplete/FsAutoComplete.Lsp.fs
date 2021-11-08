@@ -893,7 +893,8 @@ type FSharpLspServer(backgroundServiceEnabled: bool, state: State, lspClient: FS
            AddTypeToIndeterminateValue.fix tryGetParseResultsForFile tryGetProjectOptions
            ChangeTypeOfNameToNameOf.fix tryGetParseResultsForFile
            AddMissingInstanceMember.fix
-           AddExplicitTypeToParameter.fix tryGetParseResultsForFile |]
+           AddExplicitTypeToParameter.fix tryGetParseResultsForFile
+           SeparateHighPrecedenceParameters.fix getRangeText |]
 
 
       match p.RootPath, c.AutomaticWorkspaceInit with
