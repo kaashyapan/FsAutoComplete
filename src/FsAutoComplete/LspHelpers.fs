@@ -105,6 +105,24 @@ module Conversions =
     let urlForCompilerCode (number: int) =
       $"https://docs.microsoft.com/en-us/dotnet/fsharp/language-reference/compiler-messages/fs%04d{number}"
 
+    let mapSafeType (o: obj) = 
+        match o with
+        | :? FSharp.Compiler.Text.Range as r -> fcsRangeToLsp r |> box
+        | _ -> o
+
+    let clean (d: System.Collections.IDictionary) = 
+        if d.Count = 0 then dict []
+        else
+            let kE = d.Keys.GetEnumerator()
+            let vE = d.Values.GetEnumerator()
+            kE.MoveNext() |> ignore
+            vE.MoveNext() |> ignore
+            [ yield (string kE.Current, mapSafeType vE.Current)
+              while kE.MoveNext() do
+                vE.MoveNext() |> ignore
+                yield (string kE.Current, mapSafeType vE.Current)
+            ] |> dict
+
     let fcsErrorToDiagnostic (error: FSharpDiagnostic) =
         {
             Range =
@@ -118,7 +136,7 @@ module Conversions =
             Code = Some (string error.ErrorNumber)
             RelatedInformation = Some [||]
             Tags = None
-            Data = None
+            Data = Some (box (clean error.Data))
             CodeDescription = Some { Href = Some (Uri (urlForCompilerCode error.ErrorNumber))}
         }
 

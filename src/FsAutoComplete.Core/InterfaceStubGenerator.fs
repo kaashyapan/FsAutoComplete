@@ -38,7 +38,7 @@ let getMemberNameAndRanges = function
     | InterfaceData.ObjExpr(_, bindings) ->
         List.choose (|MemberNameAndRange|_|) bindings
 
-let private walkTypeDefn pos (SynTypeDefn(info, repr, members, implicitCtor, range)) =
+let private walkTypeDefn pos (SynTypeDefn(members = members; implicitConstructor = implicitCtor)) =
   Option.toList implicitCtor @ members
   |> List.tryPick (fun m ->
     if Range.rangeContainsPos m.Range pos

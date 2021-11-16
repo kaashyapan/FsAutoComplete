@@ -16,7 +16,7 @@ type FSharpCompilerServiceChecker(backgroundServiceEnabled, hasAnalyzers) =
   let checker =
     FSharpChecker.Create(
       projectCacheSize = 200,
-      keepAllBackgroundResolutions = not backgroundServiceEnabled,
+      keepAllBackgroundResolutions = true,
       keepAssemblyContents = hasAnalyzers,
       suggestNamesForErrors = true,
       enablePartialTypeChecking = not hasAnalyzers,

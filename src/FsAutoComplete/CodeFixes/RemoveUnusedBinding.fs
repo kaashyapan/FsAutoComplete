@@ -44,7 +44,7 @@ type FSharpParseFileResults with
 
         override _.VisitBinding(_, defaultTraverse, binding) =
             match binding with
-            | SynBinding(_, SynBindingKind.Normal, _, _, _, _, _, pat, _, _, _, _) as binding ->
+            | SynBinding(kind = SynBindingKind.Normal; headPat = pat;) as binding ->
                 // walk the patterns in the binding first, to allow the parameter traversal a chance to fire
                 match defaultTraverse binding with
                 | None ->

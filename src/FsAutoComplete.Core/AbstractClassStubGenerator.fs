@@ -19,7 +19,7 @@ type AbstractClassData =
     | ExplicitImpl(t, _, _) -> expandTypeParameters t
 
 /// checks to see if a type definition inherits an abstract class, and if so collects the members defined at that
-let private walkTypeDefn (SynTypeDefn(info, repr, members, implicitCtor, range)) =
+let private walkTypeDefn (SynTypeDefn(info, _, repr, members, implicitCtor, range)) =
   let reprMembers =
     match repr with
     | SynTypeDefnRepr.ObjectModel (_, members, _) -> members

@@ -74,7 +74,7 @@ type FSharpParseFileResults with
 
             override __.VisitBinding (_, _, binding) =
                 match binding with
-                | SynBinding(_, _, _, _, _, _, valData, _, _, _, ((ContainsPos pos) as range), _) ->
+                | SynBinding(valData = valData; range = (ContainsPos pos) as range) ->
                     let info = valData.SynValInfo.CurriedArgInfos
                     let mutable found = false
                     for group in info do
@@ -105,7 +105,7 @@ type FSharpParseFileResults with
             | _ -> defaultTraverse expr
           member _.VisitBinding(_, defaultTraverse, binding) =
             match binding with
-            | SynBinding (_, SynBindingKind.Normal, _, _, _, _, _, _, _, (InfixAppOfOpEqualsGreater(lambdaArgs, lambdaBody) as app), _, _) ->
+            | SynBinding (kind = SynBindingKind.Normal; expr = InfixAppOfOpEqualsGreater(lambdaArgs, lambdaBody) as app) ->
               Some(app.Range, lambdaArgs.Range, lambdaBody.Range)
             | _ -> defaultTraverse binding
         }
@@ -216,7 +216,7 @@ type FSharpParseFileResults with
                     bindings
                     |> List.tryFind (fun x -> Range.rangeContainsPos x.RangeOfBindingWithRhs pos)
                 match binding with
-                | Some(SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _)) ->
+                | Some(SynBinding(expr = expr)) ->
                     getIdentRangeForFuncExprInApp traverseSynExpr expr pos
                 | None ->
                     getIdentRangeForFuncExprInApp traverseSynExpr body pos
@@ -341,7 +341,7 @@ type FSharpParseFileResults with
 
               override _.VisitBinding(_, defaultTraverse, binding) =
                   match binding with
-                  | SynBinding(_, _, _, _, _, _, _, _, _, expr, range, _) when Position.posEq range.Start pos ->
+                  | SynBinding(expr = expr; range = range) when Position.posEq range.Start pos ->
                       match expr with
                       | SynExpr.Lambda _ -> Some range
                       | _ -> None
@@ -351,7 +351,7 @@ type FSharpParseFileResults with
 module SyntaxTreeOps =
   open FSharp.Compiler.Syntax
   let rec synExprContainsError inpExpr =
-    let rec walkBind (SynBinding(_, _, _, _, _, _, _, _, _, synExpr, _, _)) = walkExpr synExpr
+    let rec walkBind (SynBinding(expr = synExpr)) = walkExpr synExpr
 
     and walkExprs es = es |> List.exists walkExpr
 
@@ -417,11 +417,11 @@ module SyntaxTreeOps =
 
           | SynExpr.AnonRecd (_, origExpr, flds, _) ->
               (match origExpr with Some (e, _) -> walkExpr e | None -> false) ||
-              walkExprs (List.map snd flds)
+              walkExprs (List.map thd flds)
 
           | SynExpr.Record (_, origExpr, fs, _) ->
               (match origExpr with Some (e, _) -> walkExpr e | None -> false) ||
-              let flds = fs |> List.choose (fun (_, v, _) -> v)
+              let flds = fs |> List.choose (fun (SynExprRecordField(expr = v)) -> v)
               walkExprs flds
 
           | SynExpr.ObjExpr (_, _, bs, is, _, _) ->
@@ -431,7 +431,7 @@ module SyntaxTreeOps =
           | SynExpr.While (_, e1, e2, _) ->
               walkExpr e1 || walkExpr e2
 
-          | SynExpr.For (_, _, e1, _, e2, e3, _) ->
+          | SynExpr.For (identBody = e1; toBody = e2; doBody = e3) ->
               walkExpr e1 || walkExpr e2 || walkExpr e3
 
           | SynExpr.MatchLambda (_, _, cl, _, _) ->
@@ -474,7 +474,7 @@ module SyntaxTreeOps =
               walkExpr e || walkMatchClauses cl
 
           | SynExpr.LetOrUseBang  (rhs = e1; body = e2; andBangs = es) ->
-              walkExpr e1 || walkExprs [ for (_,_,_,_,e,_) in es do yield e ] || walkExpr e2
+              walkExpr e1 || walkExprs [ for SynExprAndBang(body = e) in es do yield e ] || walkExpr e2
 
           | SynExpr.InterpolatedString (parts, _, _m) ->
               walkExprs

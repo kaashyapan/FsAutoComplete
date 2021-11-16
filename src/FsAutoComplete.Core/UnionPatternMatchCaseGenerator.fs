@@ -97,7 +97,7 @@ let private tryFindPatternMatchExprInParsedInput (pos: Position) (parsedInput: P
                 None
             | SynModuleDecl.NamespaceFragment(fragment) ->
                 walkSynModuleOrNamespace fragment
-            | SynModuleDecl.NestedModule(_, _, modules, _, _) ->
+            | SynModuleDecl.NestedModule(decls = modules) ->
                 List.tryPick walkSynModuleDecl modules
             | SynModuleDecl.Types(typeDefs, _range) ->
                 List.tryPick walkSynTypeDefn typeDefs
@@ -109,7 +109,7 @@ let private tryFindPatternMatchExprInParsedInput (pos: Position) (parsedInput: P
                 None
         )
 
-    and walkSynTypeDefn(SynTypeDefn(_componentInfo, representation, members, implicitCtor, range)) =
+    and walkSynTypeDefn(SynTypeDefn(_componentInfo, _, representation, members, implicitCtor, range)) =
         getIfPosInRange range (fun () ->
             walkSynTypeDefnRepr representation
             |> Option.orElseWith (fun _ -> Option.bind walkSynMemberDefn implicitCtor)
@@ -130,7 +130,7 @@ let private tryFindPatternMatchExprInParsedInput (pos: Position) (parsedInput: P
             match memberDefn with
             | SynMemberDefn.AbstractSlot(_synValSig, _memberFlags, _range) ->
                 None
-            | SynMemberDefn.AutoProperty(_attributes, _isStatic, _id, _type, _memberKind, _memberFlags, _xmlDoc, _access, expr, _r1, _r2) ->
+            | SynMemberDefn.AutoProperty(synExpr = expr) ->
                 walkExpr expr
             | SynMemberDefn.Interface(_, members, _range) ->
                 Option.bind (List.tryPick walkSynMemberDefn) members
@@ -149,7 +149,7 @@ let private tryFindPatternMatchExprInParsedInput (pos: Position) (parsedInput: P
                 None
         )
 
-    and walkBinding (SynBinding(_access, _bindingKind, _isInline, _isMutable, _attrs, _xmldoc, _valData, _headPat, _retTy, expr, _bindingRange, _seqPoint) as binding) =
+    and walkBinding (SynBinding(expr = expr) as binding) =
         getIfPosInRange binding.RangeOfBindingWithRhs (fun () -> walkExpr expr)
 
     and walkExpr expr =
@@ -179,7 +179,7 @@ let private tryFindPatternMatchExprInParsedInput (pos: Position) (parsedInput: P
             | SynExpr.Record(_inheritOpt, copyOpt, fields, _range) ->
                 let fieldExprList =
                     fields
-                    |> List.choose (fun (_, fieldExprOpt, _) -> fieldExprOpt)
+                    |> List.choose (fun (SynExprRecordField(expr = fieldExprOpt)) -> fieldExprOpt)
 
                 match copyOpt with
                 | Some(copyExpr, _blockSeparator) ->
@@ -196,7 +196,7 @@ let private tryFindPatternMatchExprInParsedInput (pos: Position) (parsedInput: P
             | SynExpr.ForEach(_sequencePointInfoForForLoop, _seqExprOnly, _isFromSource, _synPat, synExpr1, synExpr2, _range) ->
                 List.tryPick walkExpr [synExpr1; synExpr2]
 
-            | SynExpr.For(_sequencePointInfoForForLoop, _ident, synExpr1, _, synExpr2, synExpr3, _range) ->
+            | SynExpr.For(identBody = synExpr1; toBody = synExpr2; doBody = synExpr3) ->
                 List.tryPick walkExpr [synExpr1; synExpr2; synExpr3]
 
             | SynExpr.MatchLambda(isExnMatch,
@@ -315,9 +315,9 @@ let private tryFindPatternMatchExprInParsedInput (pos: Position) (parsedInput: P
             | SynExpr.DoBang(synExpr, _range) ->
                 walkExpr synExpr
 
-            | SynExpr.LetOrUseBang(_sequencePointInfoForBinding, _, _, _synPat, synExpr1, ands, synExpr2, _range) ->
+            | SynExpr.LetOrUseBang(rhs = synExpr1; andBangs = ands; body =synExpr2;) ->
                 [ synExpr1
-                  yield! ands |> List.map (fun (_,_,_,_,body,_) -> body)
+                  yield! ands |> List.map (fun (SynExprAndBang(body = body)) -> body)
                   synExpr2 ] |> List.tryPick walkExpr
 
             | SynExpr.LibraryOnlyILAssembly _
@@ -362,7 +362,7 @@ let getWrittenCases (patMatchExpr: PatternMatchExpr) =
 
         | SynPat.Record(recordInnerPatList, _) ->
             recordInnerPatList
-            |> List.map (fun (_, innerPat) -> innerPat)
+            |> List.map thd
             |> List.forall checkPattern
 
         | SynPat.OptionalVal(_, _) -> true
@@ -384,8 +384,7 @@ let getWrittenCases (patMatchExpr: PatternMatchExpr) =
         | SynArgPats.NamePatPairs(namedPatList, _) ->
             let patList =
                 namedPatList
-                |> List.unzip
-                |> (fun (_, pat) -> pat)
+                |> List.map thd
 
             if List.forall checkPattern patList then
                 Some (func())

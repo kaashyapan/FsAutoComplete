@@ -19,7 +19,7 @@ open FSharp.Compiler.Symbols
 type RecordExpr = {
     Expr: SynExpr
     CopyExprOption: option<SynExpr * BlockSeparator>
-    FieldExprList: (RecordFieldName * SynExpr option * BlockSeparator option) list
+    FieldExprList: SynExprRecordField list
 }
 
 [<RequireQualifiedAccess>]
@@ -65,8 +65,7 @@ type RecordStubsInsertionParams =
                 expr.FieldExprList
                 |> List.choose (fun fieldInfo ->
                     match fieldInfo with
-                    | (LongIdentWithDots(identHead :: _, _), true as _isSyntacticallyCorrect),
-                       _exprOpt, _semiColonOpt ->
+                    | SynExprRecordField(fieldName = (LongIdentWithDots(identHead :: _, _), true)) ->
                         let fieldLine = identHead.idRange.StartLine
                         let indentColumn = identHead.idRange.StartColumn
                         Some (fieldInfo, indentColumn, fieldLine)
@@ -95,9 +94,8 @@ type RecordStubsInsertionParams =
 
                 return!
                     match lastFieldInfo with
-                    | _recordFieldName, None, _ -> None
-                    | (LongIdentWithDots(_ :: _, _), true as _isSyntacticallyCorrect),
-                      Some expr, semiColonOpt ->
+                    | SynExprRecordField(expr = None) -> None
+                    | SynExprRecordField(fieldName = LongIdentWithDots(_ :: _, _), true; expr = Some expr; blockSeparator = semiColonOpt) ->
                         match semiColonOpt with
                         | None ->
                             { Kind = PositionKind.AfterLastField
@@ -141,7 +139,7 @@ let private formatField (ctxt: Context) prependNewLine
 
 let formatRecord (insertionPos: RecordStubsInsertionParams) (fieldDefaultValue: string)
                  (entity: FSharpEntity)
-                 (fieldsWritten: (RecordFieldName * _ * Option<_>) list) =
+                 (fieldsWritten: SynExprRecordField list) =
     Debug.Assert(entity.IsFSharpRecord, "Entity has to be an F# record.")
     use writer = new ColumnIndentedTextWriter()
     let ctxt =
@@ -152,12 +150,12 @@ let formatRecord (insertionPos: RecordStubsInsertionParams) (fieldDefaultValue: 
 
     let fieldsWritten =
         fieldsWritten
-        |> List.collect (function
-            ((fieldName, _), _, _) ->
-                // Extract <Field> in qualified identifiers: A.B.<Field> = ...
-                if fieldName.Lid.Length > 0 then
-                    [(fieldName.Lid.Item (fieldName.Lid.Length - 1)).idText]
-                else [])
+        |> List.collect (
+            function (SynExprRecordField(fieldName = (fieldName, _))) ->
+                        // Extract <Field> in qualified identifiers: A.B.<Field> = ...
+                        if fieldName.Lid.Length > 0 then
+                            [(fieldName.Lid.Item (fieldName.Lid.Length - 1)).idText]
+                        else [])
         |> Set.ofList
 
     let fieldsToWrite =
@@ -211,7 +209,7 @@ let private tryFindRecordBindingInParsedInput (pos: Position) (parsedInput: Pars
                 None
             | SynModuleDecl.NamespaceFragment(fragment) ->
                 walkSynModuleOrNamespace fragment
-            | SynModuleDecl.NestedModule(_, _, modules, _, _) ->
+            | SynModuleDecl.NestedModule(decls = modules) ->
                 List.tryPick walkSynModuleDecl modules
             | SynModuleDecl.Types(typeDefs, _range) ->
                 List.tryPick walkSynTypeDefn typeDefs
@@ -223,7 +221,7 @@ let private tryFindRecordBindingInParsedInput (pos: Position) (parsedInput: Pars
                 None
         )
 
-    and walkSynTypeDefn(SynTypeDefn(_componentInfo, representation, members, implicitCtor, range)) =
+    and walkSynTypeDefn(SynTypeDefn(_componentInfo, _, representation, members, implicitCtor, range)) =
         getIfPosInRange range (fun () ->
             walkSynTypeDefnRepr representation
             |> Option.orElseWith (fun _ -> Option.bind walkSynMemberDefn implicitCtor)
@@ -244,7 +242,7 @@ let private tryFindRecordBindingInParsedInput (pos: Position) (parsedInput: Pars
             match memberDefn with
             | SynMemberDefn.AbstractSlot(_synValSig, _memberFlags, _range) ->
                 None
-            | SynMemberDefn.AutoProperty(_attributes, _isStatic, _id, _type, _memberKind, _memberFlags, _xmlDoc, _access, expr, _r1, _r2) ->
+            | SynMemberDefn.AutoProperty(synExpr = expr) ->
                 walkExpr expr
             | SynMemberDefn.Interface(_, members, _range) ->
                 Option.bind (List.tryPick walkSynMemberDefn) members
@@ -263,7 +261,7 @@ let private tryFindRecordBindingInParsedInput (pos: Position) (parsedInput: Pars
                 None
         )
 
-    and walkBinding (SynBinding(_access, _bindingKind, _isInline, _isMutable, _attrs, _xmldoc, _valData, _headPat, retTy, expr, _bindingRange, _seqPoint) as binding) =
+    and walkBinding (SynBinding(returnInfo = retTy; expr = expr) as binding) =
         getIfPosInRange binding.RangeOfBindingWithRhs (fun () ->
             match retTy with
             | Some(SynBindingReturnInfo(_ty, _range, _attributes)) ->
@@ -277,7 +275,7 @@ let private tryFindRecordBindingInParsedInput (pos: Position) (parsedInput: Pars
                         yield synType.Range
 
                         // Get all field identifiers ranges
-                        for (recordFieldIdent, _), _, _ in fields do
+                        for SynExprRecordField(fieldName = (recordFieldIdent, _)) in fields do
                             yield recordFieldIdent.Range
                     ]
                     |> List.tryPick (fun range ->
@@ -315,7 +313,7 @@ let private tryFindRecordBindingInParsedInput (pos: Position) (parsedInput: Pars
                         yield synType.Range
 
                         // Get all field identifiers ranges
-                        for (recordFieldIdent, _), _, _ in fields do
+                        for SynExprRecordField(fieldName = (recordFieldIdent, _)) in fields do
                             yield recordFieldIdent.Range
                     ]
                     |> List.tryPick (fun range ->
@@ -348,7 +346,7 @@ let private tryFindRecordBindingInParsedInput (pos: Position) (parsedInput: Pars
             | SynExpr.Record(_inheritOpt, copyOpt, fields, _range) ->
                 fields
                 |> List.tryPick (function
-                    | (recordFieldIdent, _), _, _
+                    | SynExprRecordField(fieldName = recordFieldIdent, _)
                         when Range.rangeContainsPos (recordFieldIdent.Range) pos ->
                         Some { Expr = expr
                                CopyExprOption = copyOpt
@@ -365,7 +363,7 @@ let private tryFindRecordBindingInParsedInput (pos: Position) (parsedInput: Pars
             | SynExpr.ForEach(_sequencePointInfoForForLoop, _seqExprOnly, _isFromSource, _synPat, synExpr1, synExpr2, _range) ->
                 List.tryPick walkExpr [synExpr1; synExpr2]
 
-            | SynExpr.For(_sequencePointInfoForForLoop, _ident, synExpr1, _, synExpr2, synExpr3, _range) ->
+            | SynExpr.For(identBody = synExpr1; toBody = synExpr2; doBody = synExpr3) ->
                 List.tryPick walkExpr [synExpr1; synExpr2; synExpr3]
 
             | SynExpr.MatchLambda(_isExnMatch, _argm, synMatchClauseList, _spBind, _wholem) ->
@@ -452,9 +450,9 @@ let private tryFindRecordBindingInParsedInput (pos: Position) (parsedInput: Pars
             | SynExpr.DoBang(synExpr, _range) ->
                 walkExpr synExpr
 
-            | SynExpr.LetOrUseBang(_sequencePointInfoForBinding, _, _, _synPat, synExpr1, ands, synExpr2, _range) ->
+            | SynExpr.LetOrUseBang(rhs = synExpr1; andBangs = ands; body = synExpr2) ->
                 [ synExpr1
-                  yield! ands |> List.map (fun (_,_,_,_,body,_) -> body)
+                  yield! ands |> List.map (fun (SynExprAndBang(body = body)) -> body)
                   synExpr2 ] |> List.tryPick walkExpr
 
             | SynExpr.LibraryOnlyILAssembly _
@@ -472,7 +470,7 @@ let private tryFindRecordBindingInParsedInput (pos: Position) (parsedInput: Pars
             | _ -> None
         )
 
-    and walkRecordField (_recordFieldName, synExprOpt, _) =
+    and walkRecordField (SynExprRecordField(expr = synExprOpt;)) =
         match synExprOpt with
         | Some synExpr when Range.rangeContainsPos synExpr.Range pos -> walkExpr synExpr
         | _ -> None
@@ -501,18 +499,18 @@ let checkThatRecordExprEndsWithRBrace (codeGenService: CodeGenerationService) (d
             | _ ->
                 let lastField = Seq.last expr.FieldExprList
                 match lastField with
-                | _fieldName, Some _fieldExpr, Some (semiColonRange, Some _semiColonEndPos) ->
+                | SynExprRecordField(expr = Some _; blockSeparator = Some (semiColonRange, _)) ->
                     // The last field ends with a ';'
                     // Look here: { field = expr;<start> ... }<end>
                     Some (Range.unionRanges semiColonRange.EndRange expr.Expr.Range.EndRange)
 
 
-                | _fieldName, Some fieldExpr, _ ->
+                | SynExprRecordField(expr = Some fieldExpr) ->
                     // The last field doesn't end with a ';'
                     // Look here: { field = expr<start> ... }<end>
                     Some (Range.unionRanges fieldExpr.Range.EndRange expr.Expr.Range.EndRange)
 
-                | _fieldName, None, _ ->
+                | SynExprRecordField(expr = None) ->
                     // We don't allow generation when the last field isn't assigned an expression
                     None
 
