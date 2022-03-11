@@ -1,0 +1,5 @@
+# these are failed compilations on purpose, so fantomas can't format them
+test/FsAutoComplete.Tests.Lsp/TestCases/
+
+# paket-managed files
+paket-files/

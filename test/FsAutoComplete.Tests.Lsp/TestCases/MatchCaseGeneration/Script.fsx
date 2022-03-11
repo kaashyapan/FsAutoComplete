@@ -1,4 +1,7 @@
-type Letter = A | B | C
+type Letter =
+  | A
+  | B
+  | C
 
 let char = A
 

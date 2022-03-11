@@ -58,8 +58,7 @@ module ProcessHelper =
 
       let! token = Async.CancellationToken
 
-      let _registered =
-        token.Register(fun _ -> tcs.SetCanceled())
+      let _registered = token.Register(fun _ -> tcs.SetCanceled())
 
       let! _ = tcs.Task |> Async.AwaitTask
       ()
@@ -74,12 +73,15 @@ type ProjectFilePath = string
 type SourceFilePath = string
 type FilePath = string
 type LineStr = string
+
 /// OS-local, normalized path
 [<Measure>]
 type LocalPath
+
 /// An HTTP url
 [<Measure>]
 type Url
+
 /// OS-Sensitive path segment from some repository root
 [<Measure>]
 type RepoPathSegment
@@ -209,7 +211,7 @@ module AsyncResult =
   let inline bimap okF errF r = Async.map (Result.bimap okF errF) r
   let inline ofOption recover o = Async.map (Result.ofOption recover) o
 
-// Maybe computation expression builder, copied from ExtCore library
+/// Maybe computation expression builder, copied from ExtCore library
 /// https://github.com/jack-pappas/ExtCore/blob/master/ExtCore/Control.fs
 [<Sealed>]
 type MaybeBuilder() =
@@ -385,8 +387,7 @@ module Array =
     if array.Length = 0 then
       state
     else
-      let folder =
-        OptimizedClosures.FSharpFunc<_, _, _, _>.Adapt folder
+      let folder = OptimizedClosures.FSharpFunc<_, _, _, _>.Adapt folder
 
       let mutable state: 'State = state
       let len = array.Length
@@ -456,7 +457,7 @@ module Array =
     else
       let arrlen, revlen = array.Length - 1, array.Length / 2 - 1
 
-      for idx in 0 .. revlen do
+      for idx in 0..revlen do
         let t1 = array.[idx]
         let t2 = array.[arrlen - idx]
         array.[idx] <- t2
@@ -467,7 +468,7 @@ module Array =
     | [||]
     | [| _ |] -> xs, [||]
     | _ when n >= xs.Length || n < 0 -> xs, [||]
-    | _ -> xs.[0..n - 1], xs.[n..]
+    | _ -> xs.[0 .. n - 1], xs.[n..]
 
   let partitionResults (xs: _ []) =
     let oks = ResizeArray(xs.Length)
@@ -555,7 +556,7 @@ module String =
   let splitAtChar (splitter: char) (s: string) =
     match s.IndexOf splitter with
     | -1 -> NoMatch
-    | n -> Split(s.[0..n - 1], s.Substring(n + 1))
+    | n -> Split(s.[0 .. n - 1], s.Substring(n + 1))
 
 type ConcurrentDictionary<'key, 'value> with
   member x.TryFind key =
@@ -583,8 +584,7 @@ type Path with
   static member FilePathToUri(filePath: string) : string =
     let filePath, finished =
       if filePath.Contains "Untitled-" then
-        let rg =
-          System.Text.RegularExpressions.Regex.Match(filePath, @"(Untitled-\d+).fsx")
+        let rg = System.Text.RegularExpressions.Regex.Match(filePath, @"(Untitled-\d+).fsx")
 
         if rg.Success then
           rg.Groups.[1].Value, true
@@ -594,8 +594,7 @@ type Path with
         filePath, false
 
     if not finished then
-      let uri =
-        System.Text.StringBuilder(filePath.Length)
+      let uri = System.Text.StringBuilder(filePath.Length)
 
       for c in filePath do
         if (c >= 'a' && c <= 'z')
@@ -715,8 +714,7 @@ module Version =
 
     match assemblies with
     | [| x |] ->
-      let assembly =
-        x :?> AssemblyInformationalVersionAttribute
+      let assembly = x :?> AssemblyInformationalVersionAttribute
 
       assembly.InformationalVersion
     | _ -> ""

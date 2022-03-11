@@ -12,13 +12,18 @@ let fix (getRangeText: GetRangeText) =
   Run.ifDiagnosticByMessage
     "It is recommended that objects supporting the IDisposable interface are created using the syntax"
     (fun diagnostic codeActionParams ->
-      match getRangeText (codeActionParams.TextDocument.GetFilePath() |> Utils.normalizePath) diagnostic.Range with
+      match
+        getRangeText
+          (codeActionParams.TextDocument.GetFilePath()
+           |> Utils.normalizePath)
+          diagnostic.Range
+        with
       | Ok errorText ->
-          AsyncResult.retn [ { SourceDiagnostic = Some diagnostic
-                               File = codeActionParams.TextDocument
-                               Title = "Add new"
-                               Edits =
-                                 [| { Range = diagnostic.Range
-                                      NewText = $"new %s{errorText}" } |]
-                               Kind = FixKind.Refactor } ]
+        AsyncResult.retn [ { SourceDiagnostic = Some diagnostic
+                             File = codeActionParams.TextDocument
+                             Title = "Add new"
+                             Edits =
+                               [| { Range = diagnostic.Range
+                                    NewText = $"new %s{errorText}" } |]
+                             Kind = FixKind.Refactor } ]
       | Error _ -> AsyncResult.retn [])

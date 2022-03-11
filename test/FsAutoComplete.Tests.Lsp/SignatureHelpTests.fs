@@ -13,8 +13,7 @@ type TriggerType =
 
 let private server state =
   async {
-    let path =
-      Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "SignatureHelp")
+    let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "SignatureHelp")
 
     return! serverInitialize path defaultConfigDto state
   }
@@ -29,8 +28,7 @@ let coreTestSignatureHelp hide title file (line, char) triggerType checkResp ser
     (async {
       let! (server: Lsp.FSharpLspServer, event: ClientEvents) = server
 
-      let path =
-        Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "SignatureHelp")
+      let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "SignatureHelp")
 
       let path = Path.Combine(path, file)
       let tdop: DidOpenTextDocumentParams = { TextDocument = loadDocument path }
@@ -61,7 +59,7 @@ let coreTestSignatureHelp hide title file (line, char) triggerType checkResp ser
         |> AsyncResult.foldResult id (fun e -> failwithf "unexpected request error %A" e)
 
       checkResp resp
-     })
+    })
 
 let ptestSignatureHelp = coreTestSignatureHelp true
 let testSignatureHelp = coreTestSignatureHelp false
@@ -168,9 +166,9 @@ let tests state =
             |> List.map (fun f -> f server))
          testList
            "overload edge cases"
-           [ for c in 37 .. 39 do
+           [ for c in 37..39 do
                checkOverloadsAt (0, c) $"Can get overloads at whitespace position {c - 37} of unattached parens" server
-             for c in 39 .. 41 do
+             for c in 39..41 do
                checkOverloadsAt (1, c) $"Can get overloads at whitespace position {c - 39} of attached parens" server ]
          testList
            "parameter position detect"
@@ -188,4 +186,4 @@ let tests state =
            (async {
              let! server, _ = server
              do! server.Shutdown()
-            }) ]
+           }) ]

@@ -1,5 +1,3 @@
-type Foo =
-    { name: string }
+type Foo = { name: string }
 
-let name f =
-    f.name
+let name f = f.name

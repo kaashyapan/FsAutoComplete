@@ -3,5 +3,6 @@ type MyStream() =
 
 
 open System.IO
+
 type MyStream2() =
   inherit Stream()

@@ -20,8 +20,7 @@ open FSharp.Compiler.IO
 type SourceTextExtensions =
   [<Extension>]
   static member GetText(t: ISourceText, m: FSharp.Compiler.Text.Range) : Result<string, string> =
-    let allFileRange =
-      Range.mkRange m.FileName Position.pos0 (t.GetLastFilePosition())
+    let allFileRange = Range.mkRange m.FileName Position.pos0 (t.GetLastFilePosition())
 
     if not (Range.rangeContainsRange allFileRange m) then
       Error $"%A{m} is outside of the bounds of the file"
@@ -55,8 +54,6 @@ type SourceTextExtensions =
     Array.init (t.GetLineCount()) t.GetLineString
 
   [<Extension>]
-  /// a safe alternative to GetLastCharacterPosition, which returns untagged indexes. this version
-  /// returns a FCS Pos to prevent confusion about line index offsets
   static member GetLastFilePosition(t: ISourceText) : Position =
     let endLine, endChar = t.GetLastCharacterPosition()
     Position.mkPos endLine endChar
@@ -66,9 +63,10 @@ type FileSystem(actualFs: IFileSystem, tryFindFile: string<LocalPath> -> Volatil
 
   let getContent (filename: string<LocalPath>) =
     fsLogger.debug (
-        Log.setMessage "Getting content of `{path}`"
-        >> Log.addContext "path" filename
-      )
+      Log.setMessage "Getting content of `{path}`"
+      >> Log.addContext "path" filename
+    )
+
     filename
     |> tryFindFile
     |> Option.map (fun file ->
@@ -109,8 +107,7 @@ type FileSystem(actualFs: IFileSystem, tryFindFile: string<LocalPath> -> Volatil
       r
 
     member _.GetFullPathShim(f: string) =
-      let expanded =
-        Path.FilePathToUri f |> Path.FileUriToLocalPath
+      let expanded = Path.FilePathToUri f |> Path.FileUriToLocalPath
 
       fsLogger.debug (
         Log.setMessage "{path} expanded to {expanded}"

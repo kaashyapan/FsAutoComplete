@@ -15,8 +15,7 @@ open System
 let scriptPreviewTests state =
   let server =
     async {
-      let path =
-        Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "PreviewScriptFeatures")
+      let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "PreviewScriptFeatures")
 
       let scriptPath = Path.Combine(path, "Script.fsx")
 
@@ -42,19 +41,18 @@ let scriptPreviewTests state =
                  match! waitForParseResultsForFile "Script.fsx" events with
                  | Ok () -> () // all good, no parsing/checking errors
                  | Core.Result.Error errors -> failwithf "Errors while parsing script %s: %A" scriptPath errors
-                }) ]
+               }) ]
          testCaseAsync
            "cleanup"
            (async {
              let! server, _, _ = server
              do! server.Shutdown()
-            }) ]
+           }) ]
 
 let scriptEvictionTests state =
   let server =
     async {
-      let path =
-        Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "ScriptEviction")
+      let path = Path.Combine(__SOURCE_DIRECTORY__, "TestCases", "ScriptEviction")
 
       let scriptPath = Path.Combine(path, "Script.fsx")
       let! (server, events) = serverInitialize path defaultConfigDto state
@@ -98,13 +96,13 @@ let scriptEvictionTests state =
                    |> Async.AwaitObservable
                    |> AsyncResult.bimap ignore (fun errors ->
                      Expect.isEmpty errors "Should be no typecheck errors after we set the preview argument")
-                }) ]
+               }) ]
          testCaseAsync
            "cleanup"
            (async {
              let! server, _, _ = server
              do! server.Shutdown()
-            }) ]
+           }) ]
 
 let dependencyManagerTests state =
   let server =
@@ -147,7 +145,7 @@ let dependencyManagerTests state =
                  match! waitForParseResultsForFile scriptName events with
                  | Ok _ -> ()
                  | Core.Result.Error e -> failwithf "Error during typechecking: %A" e
-                })
+               })
 
              testCaseAsync
                "fails to typecheck script when dependency manager is missing"
@@ -163,13 +161,13 @@ let dependencyManagerTests state =
                    match e with
                    | [| { Code = Some "3216" }; _ |] -> () // this is the error code that signals a missing dependency manager, so this is a 'success'
                    | e -> failwithf "Unexpected error during typechecking: %A" e
-                }) ]
+               }) ]
          testCaseAsync
            "cleanup"
            (async {
              let! server, _, _ = server
              do! server.Shutdown()
-            }) ]
+           }) ]
 
 let scriptProjectOptionsCacheTests state =
   let server =
@@ -204,10 +202,10 @@ let scriptProjectOptionsCacheTests state =
                  do! Async.Sleep(TimeSpan.FromSeconds 3.)
                  Expect.hasLength allOpts 2 "should only have two events"
                  Expect.equal allOpts.[0] allOpts.[1] "Project opts should be eqaul"
-                })
+               })
              testCaseAsync
                "cleanup"
                (async {
                  let! server, _, _, _, _ = server
                  do! server.Shutdown()
-                }) ] ]
+               }) ] ]

@@ -7,8 +7,7 @@ open FSharp.Compiler.CodeAnalysis
 open Ionide.ProjInfo.ProjectSystem
 open FsAutoComplete.Logging
 
-let logger =
-  LogProvider.getLoggerByName "Background Service"
+let logger = LogProvider.getLoggerByName "Background Service"
 
 type Msg = { Value: string }
 
@@ -33,9 +32,7 @@ type ProjectParms =
 
 type FileParms = { File: BackgroundFileCheckType }
 
-type InitParms = {
-  Ready: bool
-}
+type InitParms = { Ready: bool }
 
 let p =
   let t = typeof<State>
@@ -51,12 +48,12 @@ let pid =
 type MessageType = Diagnostics of Types.PublishDiagnosticsParams
 
 type BackgroundService =
-  abstract UpdateFile : BackgroundFileCheckType * string * int -> unit
-  abstract UpdateProject : string * FSharpProjectOptions -> unit
-  abstract SaveFile : BackgroundFileCheckType -> unit
-  abstract InitWorkspace : unit -> unit
-  abstract MessageReceived : IEvent<MessageType>
-  abstract Start : workspaceDir: string -> unit
+  abstract UpdateFile: BackgroundFileCheckType * string * int -> unit
+  abstract UpdateProject: string * FSharpProjectOptions -> unit
+  abstract SaveFile: BackgroundFileCheckType -> unit
+  abstract InitWorkspace: unit -> unit
+  abstract MessageReceived: IEvent<MessageType>
+  abstract Start: workspaceDir: string -> unit
   abstract GetSymbols: string -> Async<option<SymbolCache.SymbolUseRange array>>
   abstract GetImplementation: string -> Async<option<SymbolCache.SymbolUseRange array>>
 
@@ -69,24 +66,22 @@ type ActualBackgroundService() =
       Map.empty
       |> Map.add
            "background/notify"
-           (Client.notificationHandling
-             (fun (msg: Msg) ->
-               async {
-                 logger.info (
-                   Log.setMessage "Background service message {msg}"
-                   >> Log.addContextDestructured "msg" msg
-                 )
+           (Client.notificationHandling (fun (msg: Msg) ->
+             async {
+               logger.info (
+                 Log.setMessage "Background service message {msg}"
+                 >> Log.addContextDestructured "msg" msg
+               )
 
-                 return None
-               }))
+               return None
+             }))
       |> Map.add
            "background/diagnostics"
-           (Client.notificationHandling
-             (fun (msg: Types.PublishDiagnosticsParams) ->
-               async {
-                 messageRecieved.Trigger(Diagnostics msg)
-                 return None
-               }))
+           (Client.notificationHandling (fun (msg: Types.PublishDiagnosticsParams) ->
+             async {
+               messageRecieved.Trigger(Diagnostics msg)
+               return None
+             }))
 
     Client.Client(
       "dotnet",
@@ -99,13 +94,13 @@ type ActualBackgroundService() =
     )
 
   interface BackgroundService with
-    member x.Start (workspaceDir) =
+    member x.Start(workspaceDir) =
       logger.info (Log.setMessage "Starting background service")
       SymbolCache.initCache workspaceDir
       client.Start()
 
     member x.UpdateFile(file, content, version) =
-      let msg : UpdateFileParms =
+      let msg: UpdateFileParms =
         { File = file
           Content = content
           Version = version }
@@ -113,23 +108,29 @@ type ActualBackgroundService() =
       client.SendNotification "background/update" msg
 
     member x.UpdateProject(file, opts) =
-      let optsToSend = {opts with ReferencedProjects = [||] }
+      let optsToSend = { opts with ReferencedProjects = [||] }
+
       let refs =
-        opts.ReferencedProjects |> Array.map (fun x -> x.OutputFile)
-      let msg = { File = file; Options = optsToSend; ReferencedProjects = refs }
+        opts.ReferencedProjects
+        |> Array.map (fun x -> x.OutputFile)
+
+      let msg =
+        { File = file
+          Options = optsToSend
+          ReferencedProjects = refs }
+
       client.SendNotification "background/project" msg
 
     member x.SaveFile(file) =
-      let msg : FileParms = { File = file }
+      let msg: FileParms = { File = file }
       client.SendNotification "background/save" msg
 
-    member x.InitWorkspace () =
-      client.SendNotification "background/init" {Ready = true}
+    member x.InitWorkspace() =
+      client.SendNotification "background/init" { Ready = true }
 
     member x.MessageReceived = messageRecieved.Publish
 
-    member x.GetSymbols symbolName =
-      SymbolCache.getSymbols symbolName
+    member x.GetSymbols symbolName = SymbolCache.getSymbols symbolName
 
     member x.GetImplementation symbolName =
       SymbolCache.getImplementation symbolName
@@ -146,7 +147,7 @@ type MockBackgroundService() =
 
     member x.SaveFile(file) = ()
 
-    member x.InitWorkspace () = ()
+    member x.InitWorkspace() = ()
 
     member x.MessageReceived = m.Publish
 

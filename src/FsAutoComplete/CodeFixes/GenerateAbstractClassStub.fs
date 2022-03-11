@@ -9,49 +9,50 @@ open FsAutoComplete.LspHelpers
 open FSharp.UMX
 
 /// a codefix that generates stubs for required override members in abstract types
-let fix (getParseResultsForFile: GetParseResultsForFile)
-        (genAbstractClassStub: _ -> _ -> _ -> _ -> Async<CoreResponse<string * FcsPos>>)
-        (getTextReplacements: unit -> Map<string, string>)
-        : CodeFix =
-  Run.ifDiagnosticByCode
-    (Set.ofList [ "365"; "54" ])
-    (fun diagnostic codeActionParams ->
-      asyncResult {
-        let fileName =
-          codeActionParams.TextDocument.GetFilePath() |> Utils.normalizePath
+let fix
+  (getParseResultsForFile: GetParseResultsForFile)
+  (genAbstractClassStub: _ -> _ -> _ -> _ -> Async<CoreResponse<string * FcsPos>>)
+  (getTextReplacements: unit -> Map<string, string>)
+  : CodeFix =
+  Run.ifDiagnosticByCode (Set.ofList [ "365"; "54" ]) (fun diagnostic codeActionParams ->
+    asyncResult {
+      let fileName =
+        codeActionParams.TextDocument.GetFilePath()
+        |> Utils.normalizePath
 
-        let interestingRange =
-          (match diagnostic.Code with
-           | Some "365" ->
-               // the object expression diagnostic covers the entire interesting range
-               diagnostic.Range
-           | Some "54" ->
-               // the full-class range is on the typename, which should be enough to enable traversal
-               diagnostic.Range
-           | _ ->
-               // everything else is a best guess
-               codeActionParams.Range)
+      let interestingRange =
+        (match diagnostic.Code with
+         | Some "365" ->
+           // the object expression diagnostic covers the entire interesting range
+           diagnostic.Range
+         | Some "54" ->
+           // the full-class range is on the typename, which should be enough to enable traversal
+           diagnostic.Range
+         | _ ->
+           // everything else is a best guess
+           codeActionParams.Range)
 
-        let fcsRange = interestingRange |> protocolRangeToRange (UMX.untag fileName)
+      let fcsRange =
+        interestingRange
+        |> protocolRangeToRange (UMX.untag fileName)
 
-        let! (tyRes, line, lines) = getParseResultsForFile fileName fcsRange.Start
+      let! (tyRes, line, lines) = getParseResultsForFile fileName fcsRange.Start
 
-        match! genAbstractClassStub tyRes fcsRange lines line with
-        | CoreResponse.Res (text, position) ->
-            let replacements = getTextReplacements ()
+      match! genAbstractClassStub tyRes fcsRange lines line with
+      | CoreResponse.Res (text, position) ->
+        let replacements = getTextReplacements ()
 
-            let replaced =
-              (text, replacements)
-              ||> Seq.fold (fun text (KeyValue (key, replacement)) -> text.Replace(key, replacement))
+        let replaced =
+          (text, replacements)
+          ||> Seq.fold (fun text (KeyValue (key, replacement)) -> text.Replace(key, replacement))
 
-            return
-              [ { SourceDiagnostic = Some diagnostic
-                  Title = "Generate abstract class members"
-                  File = codeActionParams.TextDocument
-                  Edits =
-                    [| { Range = fcsPosToProtocolRange position
-                         NewText = replaced } |]
-                  Kind = FixKind.Fix } ]
-        | _ -> return []
-      }
-      )
+        return
+          [ { SourceDiagnostic = Some diagnostic
+              Title = "Generate abstract class members"
+              File = codeActionParams.TextDocument
+              Edits =
+                [| { Range = fcsPosToProtocolRange position
+                     NewText = replaced } |]
+              Kind = FixKind.Fix } ]
+      | _ -> return []
+    })

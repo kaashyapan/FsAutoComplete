@@ -22,7 +22,12 @@ module Types =
   type GetRangeText = string<LocalPath> -> LspTypes.Range -> ResultOrString<string>
   type GetFileLines = string<LocalPath> -> ResultOrString<FSharp.Compiler.Text.ISourceText>
   type GetLineText = FSharp.Compiler.Text.ISourceText -> LspTypes.Range -> Result<string, string>
-  type GetParseResultsForFile = string<LocalPath> -> FSharp.Compiler.Text.Position -> Async<ResultOrString<ParseAndCheckResults * string * FSharp.Compiler.Text.ISourceText>>
+
+  type GetParseResultsForFile =
+    string<LocalPath>
+      -> FSharp.Compiler.Text.Position
+      -> Async<ResultOrString<ParseAndCheckResults * string * FSharp.Compiler.Text.ISourceText>>
+
   type GetProjectOptionsForFile = string<LocalPath> -> ResultOrString<FSharp.Compiler.CodeAnalysis.FSharpProjectOptions>
 
   [<RequireQualifiedAccess>]
@@ -47,8 +52,15 @@ module Types =
 
       CodeAction.OfDiagnostic fix.File fileVersion fix.Title fix.SourceDiagnostic fix.Edits fix.Kind clientCapabilities
 
-    static member OfDiagnostic (fileUri) (fileVersion) title (diagnostic) (edits) fixKind clientCapabilities
-                               : CodeAction =
+    static member OfDiagnostic
+      (fileUri)
+      (fileVersion)
+      title
+      (diagnostic)
+      (edits)
+      fixKind
+      clientCapabilities
+      : CodeAction =
 
       let edit =
         { TextDocument =
@@ -56,16 +68,16 @@ module Types =
               Version = fileVersion }
           Edits = edits }
 
-      let workspaceEdit =
-        WorkspaceEdit.Create([| edit |], clientCapabilities)
+      let workspaceEdit = WorkspaceEdit.Create([| edit |], clientCapabilities)
 
       { CodeAction.Title = title
         Kind =
-          Some
-            (match fixKind with
-             | FixKind.Fix -> "quickfix"
-             | FixKind.Refactor -> "refactor"
-             | FixKind.Rewrite -> "refactor.rewrite")
+          Some(
+            match fixKind with
+            | FixKind.Fix -> "quickfix"
+            | FixKind.Refactor -> "refactor"
+            | FixKind.Rewrite -> "refactor.rewrite"
+          )
         Diagnostics = diagnostic |> Option.map Array.singleton
         IsPreferred = None
         Disabled = None
@@ -81,8 +93,7 @@ module Navigation =
     let mutable runningLength = 0
     let mutable found = false
 
-    let mutable fcsPos =
-      Unchecked.defaultof<FcsPos>
+    let mutable fcsPos = Unchecked.defaultof<FcsPos>
 
     while not found do
       let line = lines.[lineNumber]
@@ -101,32 +112,42 @@ module Navigation =
   /// advance along positions from a starting location, incrementing in a known way until a condition is met.
   /// when the condition is met, return that position.
   /// if the condition is never met, return None
-  let walkPos (lines: ISourceText) (pos: LspTypes.Position) posChange terminalCondition checkCondition: LspTypes.Position option =
-    let charAt (pos: LspTypes.Position) = lines.GetLineString(pos.Line).[pos.Character - 1]
+  let walkPos
+    (lines: ISourceText)
+    (pos: LspTypes.Position)
+    posChange
+    terminalCondition
+    checkCondition
+    : LspTypes.Position option =
+    let charAt (pos: LspTypes.Position) =
+      lines.GetLineString(pos.Line).[pos.Character - 1]
 
     let firstPos = { Line = 0; Character = 0 }
     let finalPos = fcsPosToLsp (lines.GetLastFilePosition())
 
     let rec loop pos =
       let charAt = charAt pos
-      if firstPos = pos || finalPos = pos
-      then None
-      else if terminalCondition charAt then None
-      else if not (checkCondition charAt) then loop (posChange pos)
-      else Some pos
+
+      if firstPos = pos || finalPos = pos then
+        None
+      else if terminalCondition charAt then
+        None
+      else if not (checkCondition charAt) then
+        loop (posChange pos)
+      else
+        Some pos
 
     loop pos
 
-  let inc (lines: ISourceText) (pos: LspTypes.Position): LspTypes.Position =
+  let inc (lines: ISourceText) (pos: LspTypes.Position) : LspTypes.Position =
     let lineLength = lines.GetLineString(pos.Line).Length
 
     if pos.Character = lineLength - 1 then
       { Line = pos.Line + 1; Character = 0 }
     else
-      { pos with
-          Character = pos.Character + 1 }
+      { pos with Character = pos.Character + 1 }
 
-  let dec (lines: ISourceText) (pos: LspTypes.Position): LspTypes.Position =
+  let dec (lines: ISourceText) (pos: LspTypes.Position) : LspTypes.Position =
     if pos.Character = 0 then
       let newLine = pos.Line - 1
       // decrement to end of previous line
@@ -134,16 +155,19 @@ module Navigation =
           Line = newLine
           Character = lines.GetLineString(newLine).Length - 1 }
     else
-      { pos with
-          Character = pos.Character - 1 }
+      { pos with Character = pos.Character - 1 }
 
   let rec decMany lines pos count =
-    if count <= 0 then pos
-    else decMany lines (dec lines pos) (count - 1)
+    if count <= 0 then
+      pos
+    else
+      decMany lines (dec lines pos) (count - 1)
 
   let rec incMany lines pos count =
-    if count <= 0 then pos
-    else incMany lines (inc lines pos) (count - 1)
+    if count <= 0 then
+      pos
+    else
+      incMany lines (inc lines pos) (count - 1)
 
   let walkBackUntilCondition (lines: ISourceText) (pos: LspTypes.Position) =
     walkPos lines pos (dec lines) (fun c -> false)
@@ -160,10 +184,14 @@ module Navigation =
 module Run =
   open Types
 
-  let ifEnabled enabled codeFix: CodeFix =
-    fun codeActionParams -> if enabled () then codeFix codeActionParams else AsyncResult.retn []
+  let ifEnabled enabled codeFix : CodeFix =
+    fun codeActionParams ->
+      if enabled () then
+        codeFix codeActionParams
+      else
+        AsyncResult.retn []
 
-  let private runDiagnostics pred handler: CodeFix =
+  let private runDiagnostics pred handler : CodeFix =
     fun codeActionParams ->
       codeActionParams.Context.Diagnostics
       |> Array.choose (fun d -> if pred d then Some d else None)
@@ -178,5 +206,5 @@ module Run =
   let ifDiagnosticByType (diagnosticType: string) handler : CodeFix =
     runDiagnostics (fun d -> d.Source.Contains diagnosticType) handler
 
-  let ifDiagnosticByCode codes handler: CodeFix =
+  let ifDiagnosticByCode codes handler : CodeFix =
     runDiagnostics (fun d -> d.Code.IsSome && Set.contains d.Code.Value codes) handler
