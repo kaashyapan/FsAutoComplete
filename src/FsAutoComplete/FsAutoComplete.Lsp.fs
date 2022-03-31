@@ -651,7 +651,7 @@ type FSharpLspServer(backgroundServiceEnabled: bool, state: State, lspClient: FS
 
   ///Helper function for handling file requests using **recent** type check results
   member x.fileHandler<'a>
-    (f: string<LocalPath> -> ParseAndCheckResults -> ISourceText -> AsyncLspResult<'a>)
+    (f: string<LocalPath> -> ParseAndCheckResults -> NamedText -> AsyncLspResult<'a>)
     (file: string<LocalPath>)
     : AsyncLspResult<'a> =
     async {
@@ -2644,13 +2644,13 @@ type FSharpLspServer(backgroundServiceEnabled: bool, state: State, lspClient: FS
 
     fn
     |> x.fileHandler (fun fn tyRes lines ->
-      match commands.PipelineHints tyRes with
-      | CoreResponse.InfoRes msg
-      | CoreResponse.ErrorRes msg -> AsyncLspResult.internalError msg
-      | CoreResponse.Res (res) ->
-        { Content = CommandResponse.pipelineHint FsAutoComplete.JsonSerializer.writeJson res }
-        |> success
-        |> async.Return)
+      asyncResult {
+        let res1 = commands.PipeHints(lines, tyRes)
+        let! res = commands.PipelineHints(lines, tyRes) |> Result.ofCoreResponse
+        return! success { Content = CommandResponse.pipelineHint JsonSerializer.writeJson res }
+      }
+    )
+
 
   override x.Dispose() = x.Shutdown() |> Async.Start
 

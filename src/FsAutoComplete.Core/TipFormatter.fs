@@ -1180,6 +1180,24 @@ let extractSignature (ToolTipText tips) =
   |> Option.map getSignature
   |> Option.defaultValue ""
 
+/// Active pattern that extract the type name portion out of a series of TaggedTexts
+/// of the form 'BLAH is TYPENAME'
+let (|GenericParameter|_|) (text: TaggedText[]) =
+  if text.Length >= 5 then
+    let t1 = text.[0]
+    let t2 = text.[1]
+    let t3 = text.[2]
+    let t4 = text.[3]
+    if t1.Tag = TextTag.TypeParameter
+      && t2.Tag = TextTag.Space
+      && t3.Tag = TextTag.Text && t3.Text = "is"
+      && t4.Tag = TextTag.Space then
+      let typeName = text[4..] |> unformattedTexts
+      Some typeName
+    else None
+  else
+    None
+
 /// extracts any generic parameters present in this tooltip, rendering them as plain text
 let extractGenericParameters (ToolTipText tips) =
   let firstResult x =
@@ -1197,4 +1215,4 @@ let extractGenericParameters (ToolTipText tips) =
   tips
   |> Seq.tryPick firstResult
   |> Option.defaultValue []
-  |> List.map unformattedTexts
+  |> List.choose (|GenericParameter|_|)

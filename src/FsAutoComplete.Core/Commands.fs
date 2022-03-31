@@ -20,6 +20,7 @@ open FsToolkit.ErrorHandling
 open FSharp.Analyzers
 open FSharp.UMX
 open FSharp.Compiler.Tokenization
+open FSharp.Compiler.Syntax
 
 [<RequireQualifiedAccess>]
 type LocationResponse<'a, 'b> =
@@ -86,8 +87,7 @@ type Commands
   ) =
   let fileParsed = Event<FSharpParseFileResults>()
 
-  let fileChecked =
-    Event<ParseAndCheckResults * string<LocalPath> * int>()
+  let fileChecked = Event<ParseAndCheckResults * string<LocalPath> * int>()
 
   let scriptFileProjectOptions = Event<FSharpProjectOptions>()
 
@@ -104,8 +104,7 @@ type Commands
   let fileStateSet = Event<unit>()
   let commandsLogger = LogProvider.getLoggerByName "Commands"
 
-  let checkerLogger =
-    LogProvider.getLoggerByName "CheckerEvents"
+  let checkerLogger = LogProvider.getLoggerByName "CheckerEvents"
 
   let fantomasLogger = LogProvider.getLoggerByName "Fantomas"
 
@@ -233,8 +232,7 @@ type Commands
   do
     disposables.Add
     <| fileParsed.Publish.Subscribe (fun parseRes ->
-      let decls =
-        parseRes.GetNavigationItems().Declarations
+      let decls = parseRes.GetNavigationItems().Declarations
       // string<LocalPath> is a compiler-approved path, and since this structure comes from the compiler it's safe
       state.NavigationDeclarations.[UMX.tag parseRes.FileName] <- decls)
 
@@ -280,11 +278,9 @@ type Commands
           NotificationEvent.FileParsed file
           |> notify.Trigger
 
-          let checkErrors =
-            parseAndCheck.GetParseResults.Diagnostics
+          let checkErrors = parseAndCheck.GetParseResults.Diagnostics
 
-          let parseErrors =
-            parseAndCheck.GetCheckResults.Diagnostics
+          let parseErrors = parseAndCheck.GetCheckResults.Diagnostics
 
           let errors =
             Array.append checkErrors parseErrors
@@ -359,26 +355,44 @@ type Commands
       }
       |> Async.Start)
 
-    do disposables.Add <| fileParsed.Publish.Subscribe (fun parseResults ->
-      commandsLogger.info (Log.setMessage "Test Detection of {file} started" >> Log.addContextDestructured "file" parseResults.FileName)
-      let fn = UMX.tag parseResults.FileName
-      match state.GetProjectOptions fn with
-      | None ->
-        commandsLogger.info (Log.setMessage "Test Detection of {file} - no project file" >> Log.addContextDestructured "file" parseResults.FileName)
-      | Some proj ->
-        let res =
-          if proj.OtherOptions |> Seq.exists (fun o -> o.Contains "Expecto.dll") then
-            TestAdapter.getExpectoTests parseResults.ParseTree
-          elif proj.OtherOptions |> Seq.exists (fun o -> o.Contains "nunit.framework.dll") then
-            TestAdapter.getNUnitTest parseResults.ParseTree
-          elif proj.OtherOptions |> Seq.exists (fun o -> o.Contains "xunit.assert.dll") then
-            TestAdapter.getXUnitTest parseResults.ParseTree
-          else
-            []
-        commandsLogger.info (Log.setMessage "Test Detection of {file} - {res}" >> Log.addContextDestructured "file" parseResults.FileName >> Log.addContextDestructured "res" res)
-        NotificationEvent.TestDetected (fn, res |> List.toArray)
-        |> notify.Trigger
-    )
+    do
+      disposables.Add
+      <| fileParsed.Publish.Subscribe (fun parseResults ->
+        commandsLogger.info (
+          Log.setMessage "Test Detection of {file} started"
+          >> Log.addContextDestructured "file" parseResults.FileName
+        )
+
+        let fn = UMX.tag parseResults.FileName
+
+        match state.GetProjectOptions fn with
+        | None ->
+          commandsLogger.info (
+            Log.setMessage "Test Detection of {file} - no project file"
+            >> Log.addContextDestructured "file" parseResults.FileName
+          )
+        | Some proj ->
+          let res =
+            if proj.OtherOptions
+               |> Seq.exists (fun o -> o.Contains "Expecto.dll") then
+              TestAdapter.getExpectoTests parseResults.ParseTree
+            elif proj.OtherOptions
+                 |> Seq.exists (fun o -> o.Contains "nunit.framework.dll") then
+              TestAdapter.getNUnitTest parseResults.ParseTree
+            elif proj.OtherOptions
+                 |> Seq.exists (fun o -> o.Contains "xunit.assert.dll") then
+              TestAdapter.getXUnitTest parseResults.ParseTree
+            else
+              []
+
+          commandsLogger.info (
+            Log.setMessage "Test Detection of {file} - {res}"
+            >> Log.addContextDestructured "file" parseResults.FileName
+            >> Log.addContextDestructured "res" res
+          )
+
+          NotificationEvent.TestDetected(fn, res |> List.toArray)
+          |> notify.Trigger)
 
   let parseFilesInTheBackground files =
     async {
@@ -447,9 +461,7 @@ type Commands
       GetLineText1 = fun i -> (lines :> ISourceText).GetLineString(i - 1) }
 
   let calculateNamespaceInsert (decl: DeclarationListItem) (pos: Position) getLine : CompletionNamespaceInsert option =
-    let getLine (p: Position) =
-        getLine p
-        |> Option.defaultValue ""
+    let getLine (p: Position) = getLine p |> Option.defaultValue ""
 
     let idents = decl.FullName.Split '.'
 
@@ -457,7 +469,7 @@ type Commands
     |> Option.bind (fun n ->
       state.CurrentAST
       |> Option.map (fun ast ->
-        ParsedInput.FindNearestPointToInsertOpenDeclaration(pos.Line) ast idents OpenStatementInsertionPoint.Nearest)
+        ParsedInput.FindNearestPointToInsertOpenDeclaration (pos.Line) ast idents OpenStatementInsertionPoint.Nearest)
       |> Option.map (fun ic ->
         //TODO: unite with `CodeFix/ResolveNamespace`
         //TODO: Handle Nearest AND TopLevel. Currently it's just Nearest (vs. ResolveNamespace -> TopLevel) (#789)
@@ -489,8 +501,8 @@ type Commands
         // adjust column
         let pos =
           match pos with
-          | Pos(0, c) -> pos
-          | Pos(l, 0) ->
+          | Pos (0, c) -> pos
+          | Pos (l, 0) ->
             let prev = getLine (pos.DecLine())
             let indentation = detectIndentation prev
 
@@ -499,7 +511,7 @@ type Commands
               Position.mkPos l indentation
             else
               pos
-          | Pos(_, c) -> pos
+          | Pos (_, c) -> pos
 
         { Namespace = n
           Position = pos
@@ -523,8 +535,7 @@ type Commands
     }
     |> Async.Start
 
-  let fantomasService: FantomasService =
-    new LSPFantomasService() :> FantomasService
+  let fantomasService: FantomasService = new LSPFantomasService() :> FantomasService
 
   do disposables.Add fantomasService
 
@@ -534,8 +545,7 @@ type Commands
       match ev with
       | ProjectResponse.Project (p, isFromCache) ->
         let controller = state.ProjectController
-        let opts =
-          controller.GetProjectOptionsForFsproj p.ProjectFileName
+        let opts = controller.GetProjectOptionsForFsproj p.ProjectFileName
 
         if not isFromCache then
           opts
@@ -544,7 +554,9 @@ type Commands
               Log.setMessage "Sending project {project} update"
               >> Log.addContextDestructured "project" p.ProjectFileName
             )
+
             backgroundService.UpdateProject(p.ProjectFileName, opts))
+
           p.ProjectItems
           |> List.choose (function
             | ProjectViewerItem.Compile (p, _) -> Some(Utils.normalizePath p))
@@ -560,10 +572,8 @@ type Commands
   //Initialize background service when the workspace is ready.
   do
     disposables.Add
-    <| state.ProjectController.WorkspaceReady.Subscribe(fun _ ->
-      commandsLogger.info (
-        Log.setMessage "Workspace ready - sending init request to background service"
-      )
+    <| state.ProjectController.WorkspaceReady.Subscribe (fun _ ->
+      commandsLogger.info (Log.setMessage "Workspace ready - sending init request to background service")
       backgroundService.InitWorkspace())
 
 
@@ -666,8 +676,7 @@ type Commands
         let dir = Path.GetDirectoryName fsprojPath
         let virtPathDir = Path.GetDirectoryName fileVirtPath
 
-        let newFilePath =
-          Path.Combine(dir, virtPathDir, newFileName)
+        let newFilePath = Path.Combine(dir, virtPathDir, newFileName)
 
         (File.Open(newFilePath, FileMode.OpenOrCreate))
           .Close()
@@ -685,8 +694,7 @@ type Commands
         let dir = Path.GetDirectoryName fsprojPath
         let virtPathDir = Path.GetDirectoryName fileVirtPath
 
-        let newFilePath =
-          Path.Combine(dir, virtPathDir, newFileName)
+        let newFilePath = Path.Combine(dir, virtPathDir, newFileName)
 
         (File.Open(newFilePath, FileMode.OpenOrCreate))
           .Close()
@@ -786,8 +794,7 @@ type Commands
               do state.SetLastCheckedVersion fileName version
               do fileChecked.Trigger(parseAndCheck, fileName, version)
 
-              let errors =
-                Array.append results.Diagnostics parseResult.Diagnostics
+              let errors = Array.append results.Diagnostics parseResult.Diagnostics
 
               CoreResponse.Res(errors, fileName)
         }
@@ -861,8 +868,7 @@ type Commands
         | ResultOrString.Ok text ->
           let files = Array.singleton (UMX.untag file)
 
-          let parseOptions =
-            { FSharpParsingOptions.Default with SourceFiles = files }
+          let parseOptions = { FSharpParsingOptions.Default with SourceFiles = files }
 
           let! decls = checker.GetDeclarations(file, text, parseOptions, version)
           let decls = decls |> Array.map (fun a -> a, file)
@@ -870,15 +876,13 @@ type Commands
       | ResultOrString.Error _, Some text ->
         let files = Array.singleton (UMX.untag file)
 
-        let parseOptions =
-          { FSharpParsingOptions.Default with SourceFiles = files }
+        let parseOptions = { FSharpParsingOptions.Default with SourceFiles = files }
 
         let! decls = checker.GetDeclarations(file, text, parseOptions, version)
         let decls = decls |> Array.map (fun a -> a, file)
         return CoreResponse.Res decls
       | ResultOrString.Ok (checkOptions, text), _ ->
-        let parseOptions =
-          Utils.projectOptionsToParseOptions checkOptions
+        let parseOptions = Utils.projectOptionsToParseOptions checkOptions
 
         let! decls = checker.GetDeclarations(file, text, parseOptions, version)
 
@@ -1135,8 +1139,7 @@ type Commands
         | None -> return CoreResponse.InfoRes "EntityKind not found"
         | Some entityKind ->
 
-          let symbol =
-            Lexer.getSymbol pos.Line pos.Column line SymbolLookupKind.Fuzzy [||]
+          let symbol = Lexer.getSymbol pos.Line pos.Column line SymbolLookupKind.Fuzzy [||]
 
           match symbol with
           | None -> return CoreResponse.InfoRes "Symbol at position not found"
@@ -1170,8 +1173,7 @@ type Commands
               |> List.collect (fun e ->
                 [ yield e.TopRequireQualifiedAccessParent, e.AutoOpenParent, e.Namespace, e.CleanedIdents
                   if isAttribute then
-                    let lastIdent =
-                      e.CleanedIdents.[e.CleanedIdents.Length - 1]
+                    let lastIdent = e.CleanedIdents.[e.CleanedIdents.Length - 1]
 
                     if (e.Kind LookupType.Fuzzy) = EntityKind.Attribute
                        && lastIdent.EndsWith "Attribute" then
@@ -1191,8 +1193,7 @@ type Commands
 
             let word = sym.Text
 
-            let candidates =
-              entities |> Seq.collect createEntity |> Seq.toList
+            let candidates = entities |> Seq.collect createEntity |> Seq.toList
 
             let openNamespace =
               candidates
@@ -1250,8 +1251,7 @@ type Commands
       | Some (patMatchExpr, unionTypeDefinition, insertionPos) ->
 
         if shouldGenerateUnionPatternMatchCases patMatchExpr unionTypeDefinition then
-          let result =
-            formatMatchExpr insertionPos "$1" patMatchExpr unionTypeDefinition
+          let result = formatMatchExpr insertionPos "$1" patMatchExpr unionTypeDefinition
 
           return CoreResponse.Res(result, insertionPos.InsertionPos)
         else
@@ -1269,8 +1269,7 @@ type Commands
       | None -> return CoreResponse.InfoRes "Record at position not found"
       | Some (recordEpr, (Some recordDefinition), insertionPos) ->
         if shouldGenerateRecordStub recordEpr recordDefinition then
-          let result =
-            formatRecord insertionPos "$1" recordDefinition recordEpr.FieldExprList
+          let result = formatRecord insertionPos "$1" recordDefinition recordEpr.FieldExprList
 
           let pos =
             Position.mkPos insertionPos.InsertionPos.Line insertionPos.InsertionPos.Column
@@ -1325,8 +1324,7 @@ type Commands
 
   member x.WorkspacePeek (dir: string) (deep: int) (excludedDirs: string list) =
     async {
-      let d =
-        state.ProjectController.PeekWorkspace(dir, deep, excludedDirs)
+      let d = state.ProjectController.PeekWorkspace(dir, deep, excludedDirs)
 
       return CoreResponse.Res d
     }
@@ -1361,14 +1359,12 @@ type Commands
 
       let! (opts, source) = state.TryGetFileCheckerOptionsWithSource file
 
-      let tyResOpt =
-        checker.TryGetRecentCheckResultsForFile(file, opts, source)
+      let tyResOpt = checker.TryGetRecentCheckResultsForFile(file, opts, source)
 
       match tyResOpt with
       | None -> ()
       | Some tyRes ->
-        let allUses =
-          tyRes.GetCheckResults.GetAllUsesOfAllSymbolsInFile()
+        let allUses = tyRes.GetCheckResults.GetAllUsesOfAllSymbolsInFile()
 
         let unused =
           UnusedDeclarationsAnalyzer.getUnusedDeclarationRanges allUses isScript
@@ -1382,13 +1378,14 @@ type Commands
     asyncResult {
       let! (opts, source) = state.TryGetFileCheckerOptionsWithLines file
 
-      let tyResOpt =
-        checker.TryGetRecentCheckResultsForFile(file, opts, source)
+      let tyResOpt = checker.TryGetRecentCheckResultsForFile(file, opts, source)
 
       match tyResOpt with
       | None -> ()
       | Some tyRes ->
-        let getSourceLine lineNo = (source :> ISourceText).GetLineString(lineNo - 1)
+        let getSourceLine lineNo =
+          (source :> ISourceText).GetLineString(lineNo - 1)
+
         let! simplified = SimplifyNames.getSimplifiableNames (tyRes.GetCheckResults, getSourceLine)
         let simplified = Array.ofSeq simplified
         notify.Trigger(NotificationEvent.SimplifyNames(file, simplified))
@@ -1404,7 +1401,9 @@ type Commands
       match checker.TryGetRecentCheckResultsForFile(file, opts, source) with
       | None -> return ()
       | Some tyRes ->
-        let! unused = UnusedOpens.getUnusedOpens (tyRes.GetCheckResults, (fun i -> (source: ISourceText).GetLineString(i - 1)))
+        let! unused =
+          UnusedOpens.getUnusedOpens (tyRes.GetCheckResults, (fun i -> (source: ISourceText).GetLineString(i - 1)))
+
         notify.Trigger(NotificationEvent.UnusedOpens(file, (unused |> List.toArray)))
 
     }
@@ -1522,8 +1521,7 @@ type Commands
     asyncOption {
       let! res = x.TryGetRecentTypeCheckResultsForFile file
 
-      let r =
-        res.GetCheckResults.GetSemanticClassification(range)
+      let r = res.GetCheckResults.GetSemanticClassification(range)
 
       let filteredRanges = scrubRanges r
       return CoreResponse.Res filteredRanges
@@ -1552,17 +1550,68 @@ type Commands
   //     return CoreResponse.Res html
   //   }
 
-  member __.PipelineHints(tyRes: ParseAndCheckResults) =
-    result {
-      let! contents = state.TryGetFileSource tyRes.FileName
+  member _.PipeHints(contents: NamedText, tyRes: ParseAndCheckResults) =
+    let (|IsIdent|_|) s (i: Ident) = if i.idText = s then Some() else None
+    let pipeRanges = ResizeArray()
 
+    let visitor =
+      { new SyntaxVisitorBase<_>() with
+          member x.VisitExpr(path, traverse, defaultTraverse, expr) =
+            match expr with
+            | SynExpr.App (ExprAtomicFlag.NonAtomic,
+                           false,
+                           SynExpr.App (ExprAtomicFlag.NonAtomic,
+                                        true,
+                                        SynExpr.Ident (IsIdent "op_PipeRight" as pipe),
+                                        secondArg,
+                                        _),
+                           firstArg,
+                           _) ->
+              pipeRanges.Add pipe.idRange
+              match secondArg with
+              | SynExpr.App _ ->
+                traverse secondArg |> ignore
+              | _ ->
+                // we're at the top of the pipe chain, so we can stop
+                pipeRanges.Add secondArg.Range
+              traverse firstArg |> ignore
+              None
+            | SynExpr.App (ExprAtomicFlag.NonAtomic,
+                                        true,
+                                        SynExpr.Ident (IsIdent "op_PipeRight" as pipe),
+                                        secondArg,
+                                        _) ->
+                                        pipeRanges.Add(pipe.idRange)
+                                        traverse secondArg |> ignore
+                                        None
+            | _ -> defaultTraverse expr }
+
+    SyntaxTraversal.Traverse(Position.mkPos Int32.MaxValue Int32.MaxValue, tyRes.GetParseResults.ParseTree, visitor)
+    |> ignore
+
+    let getSignatureAtPos pos =
+      option {
+        let! lineStr = contents.GetLine pos
+
+        let! tip = tyRes.TryGetToolTip pos lineStr |> Option.ofResult
+
+        match TipFormatter.extractGenericParameters tip with
+        | [] -> return! None
+        | x::[] -> return pos, x
+        | xs -> return pos, xs |> String.concat " -> "
+      }
+
+    pipeRanges
+    |> Seq.choose (fun r -> getSignatureAtPos r.End)
+    |> Seq.toArray
+
+  member __.PipelineHints(contents: NamedText, tyRes: ParseAndCheckResults) =
+    result {
       let getSignatureAtPos pos =
         option {
           let! lineStr = contents.GetLine pos
 
-          let! tip =
-            tyRes.TryGetToolTip pos lineStr
-            |> Option.ofResult
+          let! tip = tyRes.TryGetToolTip pos lineStr |> Option.ofResult
 
           return TipFormatter.extractGenericParameters tip
         }
@@ -1587,8 +1636,7 @@ type Commands
         | _ -> None
 
       let folder (lastExpressionLine, lastExpressionLineWasPipe, acc) (currentIndex, currentTokens) =
-        let isCommentOrWhitespace =
-          areTokensCommentOrWhitespace currentTokens
+        let isCommentOrWhitespace = areTokensCommentOrWhitespace currentTokens
 
         let isPipe = getStartingPipe currentTokens
 
