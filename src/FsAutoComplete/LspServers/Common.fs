@@ -257,4 +257,5 @@ module Helpers =
                 createTokenLegend<ClassificationUtils.SemanticTokenTypes, ClassificationUtils.SemanticTokenModifier>
               Range = Some true
               Full = Some(U2.First true) }
+        InlineValueProvider = Some { ResolveProvider = Some false } 
         InlayHintProvider = Some { ResolveProvider = Some false } }

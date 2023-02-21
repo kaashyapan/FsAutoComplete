@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.59.1] - 2023-02-21
+
+### Changed
+
+* Flow inline toggles into server capabilities
+
+
 ## [0.59.0] - 2023-02-20
 
 ### Added
